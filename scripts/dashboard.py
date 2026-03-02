@@ -256,13 +256,13 @@ def main():
             with gr.Tab("Plots"):
                 gr.Markdown("### Training curves")
                 run_dropdown = gr.Dropdown(
-                    choices=run_dirs,
-                    value=run_dirs[0] if run_dirs else None,
+                    choices=pipeline_dirs,
+                    value=pipeline_dirs[0] if pipeline_dirs else None,
                     label="Run directory",
                 )
                 plot_output = gr.Plot(
                     label="Loss & learning rate",
-                    value=on_run_select(run_dirs[0]) if run_dirs else None,
+                    value=on_run_select(pipeline_dirs[0]) if pipeline_dirs else None,
                 )
                 run_dropdown.change(on_run_select, run_dropdown, plot_output)
             with gr.Tab("Pipeline"):
