@@ -38,6 +38,7 @@ def parse_args():
     p.add_argument("--use_4bit_teacher", action="store_true")
     p.add_argument("--minillm_temp", type=float, default=1.0, help="KD temperature")
     p.add_argument("--max_samples", type=int, default=2000, help="Max train samples (for quick runs)")
+    p.add_argument("--eval_steps", type=int, default=50, help="Run eval every N steps")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true",
                    help="Air-gapped: use local cache only, no network (HF_HOME, HF_DATASETS_CACHE)")
@@ -169,7 +170,7 @@ def main():
         logging_steps=10,
         save_steps=500,
         eval_strategy="steps",
-        eval_steps=500,
+        eval_steps=args.eval_steps,
         remove_unused_columns=False,
         max_grad_norm=1.0,
         lr_scheduler_type="cosine",
