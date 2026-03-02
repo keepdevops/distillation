@@ -153,8 +153,7 @@ def select_and_load_model(path, model_state):
 
 
 def build_eval_ui(runs_dir, model_state):
-    run_dirs = find_run_dirs(runs_dir)
-    model_choices = [d for d in run_dirs if (Path(d) / "config.json").exists()]
+    model_choices = [d for d in find_pipeline_dirs(runs_dir) if (Path(d) / "config.json").exists()]
     if not model_choices:
         model_choices = ["(no distilled models found)"]
 
