@@ -120,8 +120,52 @@ def plot_from_state(state, title="Training"):
 def on_run_select(run_path):
     if not run_path:
         return None
-    state = load_trainer_state(run_path)
-    return plot_from_state(state, title=Path(run_path).name)
+    import sys
+    scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from plot_training import load_metrics, extract_series
+    import math
+    rows = load_metrics(run_path)
+    if not rows:
+        return None
+    series = extract_series(rows)
+    title = Path(run_path).name
+    panels = [("loss", "Loss"), ("lr", "Learning Rate")]
+    if series["perplexity"][0]:
+        panels.insert(1, ("perplexity", "Perplexity"))
+    if series["grad_norm"][0]:
+        panels.insert(-1, ("grad_norm", "Grad Norm"))
+    n = len(panels)
+    fig, axes = plt.subplots(n, 1, figsize=(8, 3 * n), sharex=True)
+    if n == 1:
+        axes = [axes]
+    fig.suptitle(title, fontsize=11)
+    for ax, (panel_id, ylabel) in zip(axes, panels):
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        if panel_id == "loss":
+            t_steps, t_loss = series["train_loss"]
+            e_steps, e_loss = series["eval_loss"]
+            if t_steps:
+                ax.plot(t_steps, t_loss, "b-", alpha=0.7, label="train loss")
+            if e_steps:
+                ax.plot(e_steps, e_loss, "g-o", markersize=3, label="eval loss")
+            if t_steps or e_steps:
+                ax.legend(loc="upper right", fontsize=8)
+        elif panel_id == "perplexity":
+            p_steps, p_vals = series["perplexity"]
+            ax.plot(p_steps, p_vals, "m-o", markersize=3)
+        elif panel_id == "grad_norm":
+            g_steps, g_vals = series["grad_norm"]
+            ax.plot(g_steps, g_vals, "r-", alpha=0.7)
+        elif panel_id == "lr":
+            lr_steps, lr_vals = series["lr"]
+            if lr_steps:
+                ax.plot(lr_steps, lr_vals, color="orange", alpha=0.8)
+    axes[-1].set_xlabel("Step")
+    plt.tight_layout()
+    return fig
 
 
 def select_and_load_model(path, model_state):

@@ -64,25 +64,15 @@ def load_metrics(output_dir):
 
 def find_gguf_files(output_dir):
     """
-    Scan output_dir (and one level up) for .gguf files.
-    Returns list of (name, size_gb).
+    Scan output_dir only for .gguf distillation artifacts.
+    Returns list of (name, size_gb, path).
     """
     root = Path(output_dir)
-    candidates = list(root.glob("*.gguf")) + list(root.parent.glob("*.gguf"))
-    # Also check scripts/ dir relative to project root
-    scripts_dir = root.parent / "scripts"
-    if scripts_dir.exists():
-        candidates += list(scripts_dir.glob("*.gguf"))
-
-    seen = set()
     results = []
-    for p in candidates:
-        if p in seen:
-            continue
-        seen.add(p)
+    for p in sorted(root.glob("*.gguf")):
         size_gb = p.stat().st_size / (1024 ** 3)
         results.append((p.name, size_gb, str(p)))
-    return sorted(results, key=lambda x: x[0])
+    return results
 
 
 def benchmark_gguf(gguf_path, n_tokens=50):
