@@ -1,0 +1,30 @@
+name: distillation_m3
+channels:
+  - conda-forge
+  - pytorch
+  - huggingface
+dependencies:
+  - python=3.11
+  - pytorch
+  - torchvision
+  - torchaudio
+  - transformers>=4.38
+  - datasets>=2.14
+  - accelerate>=0.24
+  - peft
+  - evaluate
+  - gradio>=4.0
+  - matplotlib
+  - seaborn
+  - tqdm
+  - rich
+  - pip
+  - pip:
+    - bitsandbytes
+    - trl>=0.10
+    - sentencepiece  # for convert_hf_to_gguf (Qwen/Llama tokenizers)
+    - mlx             # Apple Silicon only — MLX training backend
+    - mlx-lm          # Apple Silicon only — mlx_lm.load, mlx_lm.convert
+    - coremltools>=8.0  # CoreML export (.mlpackage); macOS only
+    # Unsloth (optional, comment out for air-gapped staging):
+    # - unsloth[mlx]  # MLX-optimized LoRA; install separately from releases

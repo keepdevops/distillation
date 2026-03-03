@@ -1,0 +1,15 @@
+{
+  "output_dir": "./distilled-minillm",
+  "open": true,
+  "offline": false,
+  "watchdog": false,
+  "backend": "pytorch",
+  "export": "gguf",
+  "outtype": "f16",
+  "q_bits": 4,
+  "coreml_quantize": null,
+  "epochs": 2,
+  "max_samples": 2000,
+  "temperature": 1.0,
+  "lora_r": 64
+}

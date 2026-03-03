@@ -1,0 +1,22 @@
+torch>=2.0
+torchvision
+torchaudio
+transformers>=4.38
+datasets>=2.14
+accelerate>=0.24
+peft
+bitsandbytes
+evaluate
+trl>=0.10
+gradio>=4.0
+matplotlib
+seaborn
+tqdm
+rich
+# MLX backend (Apple Silicon only)
+mlx
+mlx-lm
+# CoreML export (macOS only)
+coremltools>=8.0
+# Unsloth (optional — uncomment after staging for air-gapped)
+# unsloth[mlx]

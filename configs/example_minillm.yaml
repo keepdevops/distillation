@@ -1,0 +1,15 @@
+# Example MiniLLM config for Llama 8B → 1B
+# Usage: extend distill_minillm.py to accept --config this file
+
+teacher: meta-llama/Llama-3.2-8B-Instruct
+student: meta-llama/Llama-3.2-1B-Instruct
+dataset: tatsu-lab/alpaca
+output_dir: ./distilled-llama-1b
+epochs: 2
+batch_size: 4
+grad_acc: 16
+lora_r: 64
+use_4bit_teacher: true
+minillm_temp: 1.0
+teacher_mix: 0.3
+length_norm: true

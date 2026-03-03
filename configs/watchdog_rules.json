@@ -1,0 +1,17 @@
+{
+  "plateau": {
+    "window": 3,
+    "max_delta": 0.001,
+    "min_points": 5,
+    "lr_scale": 0.8
+  },
+  "thermal": {
+    "enabled": true,
+    "pause_if_over": 97,
+    "metric": "soc_temp_c"
+  },
+  "validator": {
+    "backup_before_write": true,
+    "max_lr_scale": 0.5
+  }
+}

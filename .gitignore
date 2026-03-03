@@ -1,0 +1,138 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+conda-env/
+.conda/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Model files and caches
+*.gguf
+*.safetensors
+*.bin
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pb
+*.onnx
+*.mlmodel
+*.mlpackage
+
+# HuggingFace cache
+hf_cache/
+.cache/
+huggingface/
+
+# Dataset caches
+datasets_cache/
+data/
+*.arrow
+*.parquet
+
+# Distillation outputs
+distilled-*/
+gguf_models/
+outputs/
+checkpoints/
+runs/
+wandb/
+
+# Logs
+*.log
+logs/
+tensorboard/
+mlruns/
+
+# Process IDs and temp files
+.distill.pids
+*.pid
+*.sock
+thermal.log
+dashboard.log
+watchdog.log
+distill.log
+
+# C++ build artifacts
+cpp/build/
+cpp/distilled-*/
+*.o
+*.a
+*.dylib
+*.dll
+*.exe
+
+# llama.cpp (submodule or cloned)
+llama.cpp/
+!llama.cpp/README.md
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+test_*.py
+*.bak
+
+# Environment files
+.env
+.env.local
+*.local.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Compressed files
+*.zip
+*.tar.gz
+*.rar
+*.7z
