@@ -49,7 +49,7 @@ def parse_args():
                    help="Number of sequences to evaluate (default: 500)")
     p.add_argument("--max_length", type=int, default=512,
                    help="Max token length per sequence (default: 512)")
-    p.add_argument("--batch_size", type=int, default=4)
+    p.add_argument("--batch_size", type=int, default=8, help="Batch size for evaluation (default: 8)")
     p.add_argument("--baseline_dir", type=str, default=None,
                    help="Previous run dir to compare against (regression detection)")
     p.add_argument("--threshold", type=float, default=15.0,

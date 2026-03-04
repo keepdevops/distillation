@@ -42,7 +42,7 @@ def parse_args():
     p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca")
     p.add_argument("--output_dir", type=str, default="./distilled-mlx")
     p.add_argument("--epochs", type=int, default=2)
-    p.add_argument("--batch_size", type=int, default=4)
+    p.add_argument("--batch_size", type=int, default=8, help="Batch size (default: 8, tuned for M3 Max)")
     p.add_argument("--lora_r", type=int, default=8)
     p.add_argument("--kd_temp", type=float, default=1.0, help="KD temperature")
     p.add_argument("--max_samples", type=int, default=2000)

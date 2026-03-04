@@ -21,7 +21,11 @@ import argparse
 import json
 import logging
 import os
+import sys
 from pathlib import Path
+
+# Add scripts directory to path for local imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 import torch
 from datasets import Dataset, load_dataset, load_from_disk
@@ -51,8 +55,8 @@ def parse_args():
     p.add_argument("--output_dir", type=str, default="./distilled-minillm")
     p.add_argument("--epochs", type=int, default=1,
                    help="SFT warmup epochs (default: 1 — just one pass)")
-    p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--grad_acc", type=int, default=16)
+    p.add_argument("--batch_size", type=int, default=8, help="Physical batch size (default: 8, optimized for M3 Max)")
+    p.add_argument("--grad_acc", type=int, default=8, help="Gradient accumulation steps (default: 8, effective batch = 64)")
     p.add_argument("--lora_r", type=int, default=64)
     p.add_argument("--max_samples", type=int, default=2000)
     p.add_argument("--max_new_tokens", type=int, default=128,
@@ -259,12 +263,13 @@ def main():
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         report_to="none",
+        dataloader_pin_memory=False,   # MPS does not support pin_memory
+        dataloader_num_workers=4,      # Parallel data loading (5-10% speedup)
+        dataloader_prefetch_factor=2,  # Pre-load 2 batches per worker
     )
 
     callbacks = []
     if args.watchdog:
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent))
         from watchdog_callbacks import PauseFlagCallback
         callbacks.append(PauseFlagCallback(str(sft_dir)))
 

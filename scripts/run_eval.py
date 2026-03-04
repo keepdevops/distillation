@@ -39,7 +39,7 @@ def parse_args():
     p.add_argument("--max_val_samples", type=int, default=200,
                    help="Cap validation samples to keep eval fast")
     p.add_argument("--max_length", type=int, default=256)
-    p.add_argument("--batch_size", type=int, default=4)
+    p.add_argument("--batch_size", type=int, default=8, help="Batch size for evaluation (default: 8)")
     p.add_argument("--step", type=int, default=None,
                    help="Step number to record in metrics.jsonl (default: auto-detect from checkpoint)")
     p.add_argument("--cache_dir", type=str, default=None)
