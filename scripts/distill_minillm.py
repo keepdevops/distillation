@@ -187,6 +187,7 @@ def main():
         do_train=True,
         do_eval=True,
         num_train_epochs=args.epochs,
+        max_steps=_total_steps,  # Required for on-policy dataloader
         per_device_train_batch_size=batch,
         per_device_eval_batch_size=batch,
         gradient_accumulation_steps=args.grad_acc,
