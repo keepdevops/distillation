@@ -52,7 +52,6 @@ python scripts/run_distillation_agent.py \
     --n_synthetic 1500 \
     --benchmarks \
     --compare_teacher \
-    --judge \
     --export gguf \
     --log_experiment \
     --watchdog
