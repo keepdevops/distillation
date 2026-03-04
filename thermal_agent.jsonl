@@ -1,0 +1,1 @@
+{"timestamp": 1772599200.3419368, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
