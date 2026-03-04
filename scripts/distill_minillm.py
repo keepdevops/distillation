@@ -203,7 +203,6 @@ def main():
         lr_scheduler_type="cosine",
         warmup_steps=_warmup_steps,
         dataloader_pin_memory=False,   # MPS does not support pin_memory
-        max_new_tokens=512,            # avoid clipping 90%+ of completions at 256
         num_generations=num_generations,
         num_generations_eval=4,
         rkl_advantage=True,
