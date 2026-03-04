@@ -22,7 +22,8 @@ A bare-metal, **air-gapped** knowledge distillation pipeline for Apple M3 (ARM64
 - **M3-optimized** — MPS/MLX backend, gradient checkpointing, LoRA, 4-bit teacher
 - **Three export formats** — GGUF (llama.cpp), CoreML (.mlpackage, Apple Neural Engine), MLX quantized weights
 - **UX** — CLI + Gradio (local-only), pipeline summary plots
-- **Autonomous watchdog** — plateau detection, thermal pause, LaunchAgent-ready
+- **Thermal protection** — system-wide autonomous thermal agent monitors all jobs, auto-pause/resume
+- **Training watchdog** — plateau detection, learning rate adjustment, LaunchAgent-ready
 - **Optional C++** — LibTorch + C++ watchdog for no-Python deployments
 
 ---
@@ -104,11 +105,13 @@ python scripts/run_distillation_agent.py --open --export gguf
 # MLX → all exports (GGUF + CoreML + MLX quant)
 python scripts/run_distillation_agent.py --open --backend mlx --export all
 
-# With watchdog + config file
+# With plateau detection watchdog + config file
 python scripts/run_distillation_agent.py --config configs/agent_config.json --watchdog
 ```
 
-See [docs/AUTONOMOUS_AGENT.md](docs/AUTONOMOUS_AGENT.md) for config, LaunchAgent, and watchdog integration.
+**Note:** For thermal protection, install the thermal agent separately (see section 6). It protects all jobs system-wide.
+
+See [docs/AUTONOMOUS_AGENT.md](docs/AUTONOMOUS_AGENT.md) for config and LaunchAgent setup.
 
 ### 5b. Export to CoreML (.mlpackage, Apple Neural Engine)
 
@@ -118,9 +121,26 @@ python scripts/export_coreml.py --model_dir ./distilled-minillm --quantize int4
 
 Produces `distilled-minillm.mlpackage` targeting CPU + GPU + ANE. Prints a Swift inference snippet.
 
-### 6. Autonomous Watchdog (long runs)
+### 6. Thermal Protection (system-wide)
 
-Monitor training for plateau; optional thermal pause. LaunchAgent-ready.
+**Thermal Agent** — Autonomous hardware monitoring that pauses ALL jobs when temps exceed threshold:
+
+```bash
+# Install as always-on system service (recommended)
+./scripts/install_thermal_agent.sh
+
+# Or run manually
+python scripts/thermal_agent.py --watch ./distilled-minillm --threshold 85
+
+# Fan control GUI (requires Macs Fan Control app)
+python scripts/fan_control_popup.py
+```
+
+See [THERMAL_AGENT.md](THERMAL_AGENT.md) for full details.
+
+### 7. Training Watchdog (plateau detection)
+
+Monitor training for loss plateau and adjust learning rate:
 
 ```bash
 python scripts/training_watchdog.py ./distilled-minillm --interval 60
@@ -156,22 +176,41 @@ distill/
 │   ├── WATCHDOG.md
 │   └── QUANTIZATION.md
 ├── scripts/
+│   # Training scripts
 │   ├── distill_minillm.py    # PyTorch/MPS backend (MiniLLM, reverse KL)
 │   ├── distill_mlx.py        # MLX backend (Apple-native, 2-5× faster)
 │   ├── distill_unsloth.py    # Unsloth backend (optimized LoRA + KD)
+│   ├── distill_sft.py        # Supervised fine-tuning
 │   ├── distill_forward.py    # Forward KL (classification)
-│   ├── export_coreml.py      # CoreML export → .mlpackage (ANE)
+│   # Orchestration & agents
 │   ├── run_distillation_agent.py  # End-to-end pipeline orchestrator
-│   ├── training_watchdog.py  # Plateau/thermal monitor (Python)
+│   ├── thermal_agent.py      # System-wide thermal monitoring & protection
+│   ├── training_watchdog.py  # Plateau detection monitor (Python)
 │   ├── watchdog_callbacks.py # PauseFlagCallback + MetricsCallback
+│   # Thermal monitoring & control
 │   ├── monitor_cpu_gpu_temp.py    # Thermal logging via mactop
+│   ├── fan_control_popup.py  # Fan control GUI with temp display
+│   ├── install_thermal_agent.sh   # Install thermal agent as LaunchAgent
+│   # Export scripts
+│   ├── export_coreml.py      # CoreML export → .mlpackage (ANE)
+│   ├── export_student_gguf.sh     # GGUF export wrapper
+│   # Dashboard & visualization
 │   ├── dashboard.py          # Gradio: plots + eval + artifacts
 │   ├── eval_gradio.py        # Standalone eval UI
 │   ├── plot_training.py      # Loss/LR curves
 │   ├── plot_gguf_pipeline.py # Pipeline summary (GGUF/CoreML/MLX artifacts)
+│   # Evaluation & quality
+│   ├── eval_quality.py       # Quality gates and metrics
+│   ├── run_eval.py           # Validation loss evaluation
+│   ├── run_benchmarks.py     # Benchmark suite
+│   # Data & offline support
 │   ├── cache_models.py       # Pre-download HF models for offline use
 │   ├── cache_datasets.py     # Pre-download datasets for offline use
-│   └── start.sh              # Launch all services in background
+│   ├── setup_airgap.py       # Air-gap setup automation
+│   ├── generate_synthetic_data.py # Synthetic dataset generation
+│   # Service management
+│   ├── start.sh              # Launch all services in background
+│   └── stop.sh               # Stop all background services
 ├── environment.yml
 ├── requirements.txt
 └── README.md

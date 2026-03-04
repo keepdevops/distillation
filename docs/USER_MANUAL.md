@@ -16,12 +16,13 @@
 8. [Export Formats](#8-export-formats)
 9. [Running the Full Pipeline (Agent)](#9-running-the-full-pipeline-agent)
 10. [Dashboard & Visualization](#10-dashboard--visualization)
-11. [Watchdog (Long Runs)](#11-watchdog-long-runs)
-12. [Starting All Services at Once](#12-starting-all-services-at-once)
-13. [Air-Gapped / Offline Operation](#13-air-gapped--offline-operation)
-14. [Configuration Reference](#14-configuration-reference)
-15. [Script Reference](#15-script-reference)
-16. [Troubleshooting](#16-troubleshooting)
+11. [Thermal Protection (System-Wide)](#11-thermal-protection-system-wide)
+12. [Training Watchdog (Plateau Detection)](#12-training-watchdog-plateau-detection)
+13. [Starting All Services at Once](#13-starting-all-services-at-once)
+14. [Air-Gapped / Offline Operation](#14-air-gapped--offline-operation)
+15. [Configuration Reference](#15-configuration-reference)
+16. [Script Reference](#16-script-reference)
+17. [Troubleshooting](#17-troubleshooting)
 
 ---
 
@@ -489,11 +490,91 @@ open curves.png
 
 ---
 
-## 11. Watchdog (Long Runs)
+## 11. Thermal Protection (System-Wide)
 
-The watchdog monitors `metrics.jsonl` and `trainer_state.json` during training. If loss plateaus or the system gets hot, it writes `pause.flag` → the trainer saves and exits gracefully.
+The **thermal agent** is an autonomous system service that monitors CPU/GPU temperatures and automatically pauses ALL running jobs when thermal limits are exceeded. Unlike the training watchdog (plateau detection), the thermal agent provides system-wide hardware protection.
 
-### 11.1 Run watchdog in a separate terminal
+### 11.1 Why use the thermal agent?
+
+**System-wide protection:**
+- Protects ALL GPU workloads: training, inference, export, benchmarks
+- Monitors multiple jobs simultaneously
+- Always-on protection via LaunchAgent (survives reboots)
+- No need to remember `--watchdog` flags
+
+**Auto-resume:**
+- Pauses jobs when temp ≥ 85°C (configurable)
+- Resumes when temp drops to 80°C (5°C hysteresis)
+- Prevents thermal throttling and hardware damage
+
+### 11.2 Installation (recommended)
+
+Install as macOS LaunchAgent for always-on protection:
+
+```bash
+./scripts/install_thermal_agent.sh
+
+# Verify installation
+launchctl list | grep thermal_agent
+```
+
+The agent starts automatically on login and protects all jobs.
+
+### 11.3 Manual usage
+
+```bash
+# Watch single job
+python scripts/thermal_agent.py --watch ./distilled-minillm
+
+# Watch multiple jobs (system-wide)
+python scripts/thermal_agent.py --watch ./distilled-minillm ./distilled-mlx
+
+# Custom threshold (default: 85°C)
+python scripts/thermal_agent.py --watch . --threshold 70 --interval 15
+
+# Daemon mode (background process)
+python scripts/thermal_agent.py --daemon --watch . --log thermal_agent.jsonl
+```
+
+### 11.4 Fan control GUI
+
+Manual fan speed control with temperature display:
+
+```bash
+python scripts/fan_control_popup.py
+
+# With warning threshold
+python scripts/fan_control_popup.py --threshold 75
+```
+
+**Requirements:** [Macs Fan Control](https://crystalidea.com/macs-fan-control) app installed
+
+### 11.5 Configuration
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--watch` | (required) | Directories to monitor |
+| `--threshold` | 85 | Temperature threshold (°C) |
+| `--metric` | `soc_temp_c` | Metric: `soc_temp_c`, `cpu_temp_c`, `gpu_temp_c` |
+| `--hysteresis` | 5 | Resume delta (°C) |
+| `--interval` | 30 | Poll interval (seconds) |
+| `--log` | — | Log file for thermal events (JSONL) |
+| `--daemon` | off | Run as background daemon |
+
+**Recommended thresholds:**
+- M1/M2: 80°C (conservative) to 85°C (balanced)
+- M3: 85°C (conservative) to 90°C (balanced)
+- M3 Max/Pro: 90°C (conservative) to 95°C (balanced)
+
+See [THERMAL_AGENT.md](../THERMAL_AGENT.md) for complete documentation.
+
+---
+
+## 12. Training Watchdog (Plateau Detection)
+
+The **training watchdog** monitors `metrics.jsonl` and `trainer_state.json` during training. If loss plateaus, it writes `pause.flag` → the trainer saves and exits gracefully. This is separate from thermal protection and focuses on ML-specific monitoring.
+
+### 12.1 Run watchdog in a separate terminal
 
 ```bash
 # Terminal 1: start training with watchdog support
@@ -503,18 +584,7 @@ python scripts/distill_mlx.py --open --watchdog --output_dir ./distilled-mlx
 python scripts/training_watchdog.py ./distilled-mlx --interval 60
 ```
 
-### 11.2 Thermal monitoring (M3 — uses mactop, no sudo)
-
-```bash
-# Start thermal monitor
-python scripts/monitor_cpu_gpu_temp.py \
-  --interval 3 \
-  --log thermal.log
-```
-
-Thresholds (from MEMORY.md): CPU idle ~44°C, GPU idle ~39°C. Watchdog pause threshold: >90°C.
-
-### 11.3 C++ watchdog (lighter, no Python)
+### 12.2 C++ watchdog (lighter, no Python)
 
 ```bash
 cd cpp && mkdir -p build && cd build
@@ -522,7 +592,7 @@ cmake .. && cmake --build .
 ./watchdog ../../distilled-mlx --interval 60 --config ../../configs/watchdog_rules.json
 ```
 
-### 11.4 Watchdog config
+### 12.3 Watchdog config
 
 `configs/watchdog_rules.json`:
 
@@ -533,16 +603,11 @@ cmake .. && cmake --build .
     "max_delta": 0.001,
     "min_points": 5,
     "lr_scale": 0.8
-  },
-  "thermal": {
-    "enabled": true,
-    "pause_if_over": 90,
-    "metric": "cpu_temp"
   }
 }
 ```
 
-### 11.5 LaunchAgent (survives reboot)
+### 12.4 LaunchAgent (survives reboot)
 
 ```bash
 # Edit paths in the plist
@@ -554,7 +619,7 @@ See [WATCHDOG.md](WATCHDOG.md) for full LaunchAgent setup.
 
 ---
 
-## 12. Starting All Services at Once
+## 13. Starting All Services at Once
 
 `start.sh` launches the watchdog + dashboard (+ optional thermal monitor) in one command.
 
@@ -591,11 +656,11 @@ Services started:
 
 ---
 
-## 13. Air-Gapped / Offline Operation
+## 14. Air-Gapped / Offline Operation
 
 Full offline workflow — no internet on the target machine after setup.
 
-### 13.1 Stage on an online machine
+### 14.1 Stage on an online machine
 
 ```bash
 # 1. Cache models
@@ -612,7 +677,7 @@ conda pack -n distillation_m3 -o distill-offline.tar.gz
 sha256sum distill-offline.tar.gz hf_cache/* > SHA256SUMS
 ```
 
-### 13.2 Transfer to air-gapped machine
+### 14.2 Transfer to air-gapped machine
 
 Copy via USB/SSD:
 - `distill-offline.tar.gz`
@@ -621,7 +686,7 @@ Copy via USB/SSD:
 - Project code (`scripts/`, `configs/`)
 - `SHA256SUMS`
 
-### 13.3 Set up on air-gapped machine
+### 14.3 Set up on air-gapped machine
 
 ```bash
 # Restore environment
@@ -634,7 +699,7 @@ export HF_HOME=/path/to/hf_cache
 export HF_DATASETS_CACHE=/path/to/datasets_cache
 ```
 
-### 13.4 Run offline
+### 14.4 Run offline
 
 ```bash
 # PyTorch backend
@@ -654,9 +719,9 @@ See [air-gapped.md](air-gapped.md) for the full checklist.
 
 ---
 
-## 14. Configuration Reference
+## 15. Configuration Reference
 
-### 14.1 `configs/agent_config.json`
+### 15.1 `configs/agent_config.json`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -674,20 +739,19 @@ See [air-gapped.md](air-gapped.md) for the full checklist.
 | `temperature` | float | `1.0` | KD temperature |
 | `lora_r` | int | `64` | LoRA rank |
 
-### 14.2 `configs/watchdog_rules.json`
+### 15.2 `configs/watchdog_rules.json`
 
 | Key | Description |
 |-----|-------------|
 | `plateau.window` | Number of recent loss steps to check |
 | `plateau.max_delta` | Loss change below this → plateau |
 | `plateau.lr_scale` | Multiply LR by this on plateau |
-| `thermal.enabled` | Enable thermal pause |
-| `thermal.pause_if_over` | Temperature threshold (°C) |
-| `thermal.metric` | `cpu_temp`, `gpu_temp`, `soc_temp` |
+
+**Note:** Thermal monitoring is now handled by the standalone `thermal_agent.py` (see section 11).
 
 ---
 
-## 15. Script Reference
+## 16. Script Reference
 
 ### Training scripts
 
@@ -695,42 +759,85 @@ See [air-gapped.md](air-gapped.md) for the full checklist.
 |--------|---------|-------------|
 | `scripts/distill_minillm.py` | PyTorch/MPS | Existing workflows, maximum compatibility |
 | `scripts/distill_mlx.py` | MLX | Daily use, fastest on M3 |
-| `scripts/distill_forward.py` | PyTorch/MPS | Classification models (BERT, etc.) |
 | `scripts/distill_unsloth.py` | Unsloth+MLX | Lowest memory, optional install |
+| `scripts/distill_sft.py` | PyTorch/MPS | Supervised fine-tuning |
+| `scripts/distill_forward.py` | PyTorch/MPS | Classification models (BERT, etc.) |
 
 ### Export scripts
 
 | Script | Output | When to use |
 |--------|--------|-------------|
 | `scripts/export_coreml.py` | `.mlpackage` | iOS/macOS apps, Apple Neural Engine |
+| `scripts/export_student_gguf.sh` | `.gguf` | Wrapper for llama.cpp conversion |
 | `llama.cpp/convert_hf_to_gguf.py` | `.gguf` | llama-server, cross-platform inference |
 | `mlx_lm.convert` (built-in) | `mlx_q4/` dir | MLX inference, smallest on Apple Silicon |
 
-### Orchestration & monitoring
+### Orchestration & agents
 
 | Script | Purpose |
 |--------|---------|
 | `scripts/run_distillation_agent.py` | End-to-end pipeline: distill → export |
-| `scripts/training_watchdog.py` | Plateau + thermal monitor |
-| `scripts/monitor_cpu_gpu_temp.py` | Thermal logging via mactop |
-| `scripts/dashboard.py` | Gradio UI: curves + eval + artifacts |
-| `scripts/start.sh` | Launch all services in background |
+| `scripts/thermal_agent.py` | System-wide thermal monitoring & protection |
+| `scripts/training_watchdog.py` | Plateau detection (ML-specific) |
+| `scripts/watchdog_callbacks.py` | PauseFlagCallback + MetricsCallback |
 | `cpp/build/watchdog` | C++ watchdog (no Python) |
 
-### Utilities
+### Thermal monitoring & control
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/monitor_cpu_gpu_temp.py` | Thermal logging via mactop |
+| `scripts/fan_control_popup.py` | Fan control GUI with temp display |
+| `scripts/install_thermal_agent.sh` | Install thermal agent as LaunchAgent |
+| `scripts/test_fan_control.py` | Test fan control integration |
+
+### Dashboard & visualization
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/dashboard.py` | Gradio UI: curves + eval + artifacts |
+| `scripts/eval_gradio.py` | Standalone model evaluation UI |
+| `scripts/plot_training.py` | Plot loss/LR curves |
+| `scripts/plot_gguf_pipeline.py` | Full pipeline summary figure |
+
+### Evaluation & quality
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/eval_quality.py` | Quality gates and metrics |
+| `scripts/run_eval.py` | Validation loss evaluation |
+| `scripts/run_benchmarks.py` | Benchmark suite |
+| `scripts/experiment_log.py` | Experiment tracking |
+
+### Data & offline support
 
 | Script | Purpose |
 |--------|---------|
 | `scripts/cache_models.py` | Pre-download HF models for offline use |
 | `scripts/cache_datasets.py` | Pre-download datasets for offline use |
-| `scripts/plot_training.py` | Plot loss/LR curves |
-| `scripts/plot_gguf_pipeline.py` | Full pipeline summary figure |
-| `scripts/eval_gradio.py` | Standalone model evaluation UI |
-| `scripts/run_eval.py` | Validation loss curves (CLI) |
+| `scripts/setup_airgap.py` | Air-gap setup automation |
+| `scripts/generate_synthetic_data.py` | Synthetic dataset generation |
+
+### Service management
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/start.sh` | Launch all services in background |
+| `scripts/stop.sh` | Stop all background services |
 
 ---
 
-## 16. Troubleshooting
+## 17. Troubleshooting
+
+### Thermal agent issues
+
+| Problem | Fix |
+|---------|-----|
+| `mactop not found` | `brew install context-labs/tap/mactop` |
+| Thermal readings unavailable | Ensure running on Apple Silicon; test `mactop --headless --format json --count 1` |
+| pause.flag not cleared after cooldown | Check flag content with `cat pause.flag \| jq`; thermal agent only clears flags it created |
+| Multiple thermal agents running | `pkill -f thermal_agent.py` then restart one instance |
+| Fan control popup doesn't work | Install [Macs Fan Control](https://crystalidea.com/macs-fan-control) app |
 
 ### MLX issues
 
