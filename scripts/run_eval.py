@@ -44,15 +44,12 @@ def parse_args():
                    help="Step number to record in metrics.jsonl (default: auto-detect from checkpoint)")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true")
-HEAD
     p.add_argument("--compare_teacher", action="store_true",
                    help="Also eval teacher model and log perplexity gap")
     p.add_argument("--teacher", type=str, default="Qwen/Qwen2-1.5B-Instruct",
                    help="Teacher model id or path (used with --compare_teacher)")
     p.add_argument("--quant_dir", type=str, default=None,
                    help="Path to quantized HF-format model dir to compare against student")
-=======
-8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
     return p.parse_args()
 
 
@@ -132,7 +129,7 @@ def eval_loss(model, tokenizer, texts, max_length, batch_size, device):
         return None
     return total_loss / total_tokens
 
-HEAD
+
 @torch.no_grad()
 def eval_model_at_path(model_id_or_path, tokenizer, texts, max_length, batch_size, device,
                        cache_dir=None, offline=False):
@@ -152,8 +149,6 @@ def eval_model_at_path(model_id_or_path, tokenizer, texts, max_length, batch_siz
     return loss
 
 
-=======
-8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
 def main():
     args = parse_args()
     output_dir = Path(args.output_dir)
@@ -194,11 +189,7 @@ def main():
         logger.info("Base model: %s", base_model_id)
         base = AutoModelForCausalLM.from_pretrained(
             base_model_id,
-HEAD
-            dtype=torch.bfloat16,
-=======
             torch_dtype=torch.bfloat16,
-8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
             device_map="auto",
             cache_dir=cache_dir,
             local_files_only=offline,
@@ -209,11 +200,7 @@ HEAD
     else:
         model = AutoModelForCausalLM.from_pretrained(
             str(checkpoint_dir),
-HEAD
-            dtype=torch.bfloat16,
-=======
             torch_dtype=torch.bfloat16,
-8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
             device_map="auto",
             cache_dir=cache_dir,
             local_files_only=offline,
@@ -247,7 +234,6 @@ HEAD
         raise SystemExit(1)
 
     perplexity = math.exp(min(loss, 20))
-HEAD
     logger.info("step=%d  student: eval_loss=%.4f  perplexity=%.2f", step, loss, perplexity)
 
     row = {"step": step, "eval_loss": loss, "eval_perplexity": perplexity}
@@ -295,12 +281,6 @@ HEAD
             logger.warning("--quant_dir not found: %s", args.quant_dir)
 
     # Append to metrics.jsonl
-=======
-    logger.info("step=%d  eval_loss=%.4f  perplexity=%.2f", step, loss, perplexity)
-
-    # Append to metrics.jsonl
-    row = {"step": step, "eval_loss": loss, "eval_perplexity": perplexity}
-8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(jsonl_path, "a") as f:
         f.write(json.dumps(row) + "\n")

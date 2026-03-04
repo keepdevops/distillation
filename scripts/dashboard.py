@@ -62,13 +62,10 @@ def find_pipeline_dirs(runs_dir):
                 continue
         except PermissionError:
             continue
- HEAD
         # Live run: metrics.jsonl exists (trainer_state.json not yet written)
         if (d / "metrics.jsonl").exists():
             found.add(str(d))
             continue
-=======
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
         # GGUF files alongside a config.json or training_args.bin (distill output)
         if list(d.glob("*.gguf")) and (
             (d / "config.json").exists() or (d / "training_args.bin").exists()
@@ -176,7 +173,6 @@ def on_run_select(run_path):
 
 
 def select_and_load_model(path, model_state):
- HEAD
     """Load model into model_state; return status string.
 
     path can be a local directory or a HuggingFace model ID.
@@ -207,7 +203,7 @@ def select_and_load_model(path, model_state):
         local_only = is_local  # only force local_files_only for local paths
         tok = AutoTokenizer.from_pretrained(path, local_files_only=local_only)
         model = AutoModelForCausalLM.from_pretrained(
-            path, dtype=torch.bfloat16,
+            path, torch_dtype=torch.bfloat16,
             device_map="auto" if not torch.backends.mps.is_available() else None,
             local_files_only=local_only,
         )
@@ -345,52 +341,13 @@ def build_eval_ui(runs_dir, model_state):
     model_choices = [(label, path) for label, path in _discovered] if _discovered else [("(no models found)", "")]
 
     judge_state = [None, None]  # [judge_model, judge_tokenizer]
-=======
-    """Load model into model_state; return status string."""
-    import logging
-    log = logging.getLogger(__name__)
-    if not path or "(no " in path or not os.path.isdir(path):
-        return "Select a model directory"
-    path = os.path.abspath(path)
-    config_path = Path(path) / "config.json"
-    if not config_path.exists():
-        log.warning("Model dir missing config.json: %s", path)
-        return f"Invalid: no config.json in {Path(path).name}"
-    try:
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(path, local_files_only=True)
-        model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16, local_files_only=True)
-        if torch.backends.mps.is_available():
-            model = model.to("mps")
-        elif torch.cuda.is_available():
-            model = model.to("cuda")
-        model_state[0], model_state[1] = model, tok
-        log.info("Loaded model: %s", Path(path).name)
-        return f"Loaded: {Path(path).name}"
-    except Exception as e:
-        log.warning("Model load failed %s: %s", path, e)
-        return f"Failed: {e}"
-
-
-def build_eval_ui(runs_dir, model_state):
-    model_choices = [d for d in find_pipeline_dirs(runs_dir) if (Path(d) / "config.json").exists()]
-    if not model_choices:
-        model_choices = ["(no distilled models found)"]
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
 
     def generate(prompt, max_tokens, temperature):
         model, tok = model_state[0], model_state[1]
         if model is None or tok is None:
- HEAD
             return "Load a model first.", ""
         if not (prompt or "").strip():
             return "", ""
-=======
-            return "Load a model first."
-        if not (prompt or "").strip():
-            return ""
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
         inputs = tok(prompt, return_tensors="pt")
         if model.device.type in ("mps", "cuda"):
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
@@ -401,7 +358,6 @@ def build_eval_ui(runs_dir, model_state):
             temperature=float(temperature or 0.7),
             pad_token_id=tok.eos_token_id,
         )
- HEAD
         text = tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
         d1, d2, max_rep = _diversity_metrics(text)
         flag = ""
@@ -517,24 +473,6 @@ def build_eval_ui(runs_dir, model_state):
     refresh_btn.click(refresh_models, custom_path_in, [model_dropdown, load_status])
     load_path_btn.click(load_custom_path, custom_path_in, load_status)
 
-=======
-        return tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-
-    def on_model_select(path):
-        return select_and_load_model(path, model_state)
-
-    gr.Markdown("### Evaluate distilled model")
-    model_dropdown = gr.Dropdown(
-        choices=model_choices,
-        value=model_choices[0] if model_choices else None,
-        label="Model",
-    )
-    initial_status = ""
-    if model_choices and "(no " not in model_choices[0]:
-        initial_status = on_model_select(model_choices[0])
-    load_status = gr.Textbox(label="Status", interactive=False, value=initial_status)
-    model_dropdown.change(on_model_select, model_dropdown, load_status)
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
     with gr.Row():
         prompt_in = gr.Textbox(label="Prompt", placeholder="Enter your prompt...", lines=3)
     with gr.Row():
@@ -542,7 +480,6 @@ def build_eval_ui(runs_dir, model_state):
         temp = gr.Slider(0.1, 1.5, value=0.7, step=0.1, label="Temperature")
     gen_btn = gr.Button("Generate")
     output_box = gr.Textbox(label="Generated", lines=6)
- HEAD
     diversity_box = gr.Textbox(label="Diversity metrics", interactive=False)
     gen_btn.click(generate, [prompt_in, max_tok, temp], [output_box, diversity_box])
 
@@ -560,9 +497,6 @@ def build_eval_ui(runs_dir, model_state):
     judge_btn = gr.Button("Judge last response")
     judge_output = gr.Textbox(label="Judge verdict", interactive=False, lines=3)
     judge_btn.click(run_judge, [prompt_in, output_box], judge_output)
-=======
-    gen_btn.click(generate, [prompt_in, max_tok, temp], output_box)
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
 
 
 def main():
@@ -570,17 +504,12 @@ def main():
     model_state = [None, None]  # [model, tokenizer]
     run_dirs = find_run_dirs(args.runs_dir)
     pipeline_dirs = find_pipeline_dirs(args.runs_dir)
- HEAD
     with gr.Blocks(title="Distillation Dashboard") as app:
-=======
-    with gr.Blocks(title="Distillation Dashboard", theme=gr.themes.Soft()) as app:
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
         gr.Markdown("# Distillation Dashboard")
         gr.Markdown("Training curves and model evaluation. Runs locally only.")
         with gr.Tabs():
             with gr.Tab("Plots"):
                 gr.Markdown("### Training curves")
- HEAD
                 with gr.Row():
                     run_dropdown = gr.Dropdown(
                         choices=pipeline_dirs,
@@ -589,22 +518,12 @@ def main():
                         scale=4,
                     )
                     plots_refresh_btn = gr.Button("Refresh", scale=1)
-=======
-                run_dropdown = gr.Dropdown(
-                    choices=pipeline_dirs,
-                    value=pipeline_dirs[0] if pipeline_dirs else None,
-                    label="Run directory",
-                )
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
                 plot_output = gr.Plot(
                     label="Loss & learning rate",
                     value=on_run_select(pipeline_dirs[0]) if pipeline_dirs else None,
                 )
                 run_dropdown.change(on_run_select, run_dropdown, plot_output)
- HEAD
                 plots_refresh_btn.click(on_run_select, run_dropdown, plot_output)
-=======
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
             with gr.Tab("Pipeline"):
                 gr.Markdown("### End-to-end pipeline summary")
                 pipeline_run_dd = gr.Dropdown(
@@ -630,7 +549,6 @@ def main():
                 refresh_btn.click(on_pipeline_select, pipeline_run_dd, pipeline_plot)
                 if pipeline_dirs:
                     pipeline_plot.value = on_pipeline_select(pipeline_dirs[0])
- HEAD
             with gr.Tab("Thermal"):
                 gr.Markdown("### CPU / GPU temperature & power over time")
                 thermal_log_box = gr.Textbox(
@@ -903,12 +821,7 @@ def main():
                     if _ef:
                         exp_trend_plot.value = _ef
 
-    app.launch(server_name="127.0.0.1", server_port=args.port, theme=gr.themes.Soft())
-=======
-            with gr.Tab("Evaluate"):
-                build_eval_ui(args.runs_dir, model_state)
     app.launch(server_name="127.0.0.1", server_port=args.port)
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
 
 
 if __name__ == "__main__":

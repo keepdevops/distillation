@@ -6,10 +6,7 @@ Bare-metal, air-gapped compatible. Optimized for Apple M3 (MPS).
 
 import argparse
 import os
-<<<<<<< HEAD
 import warnings
-=======
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
 from pathlib import Path
 
 import torch
@@ -21,7 +18,6 @@ from transformers import (
     BitsAndBytesConfig,
 )
 
- HEAD
 # ── Silence known deprecation warnings from TRL / transformers 5.x ──────────
 # TRL 0.29 passes disable_compile as a kwarg alongside generation_config;
 # transformers 5.2 wants it inside the GenerationConfig — TRL's bug to fix.
@@ -32,8 +28,6 @@ warnings.filterwarnings(
 # Silence TRLExperimentalWarning for the minillm import path
 os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
 
-=======
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
 
 # Open models (no HuggingFace login / Meta license)
 OPEN_TEACHER = "Qwen/Qwen2-1.5B-Instruct"
@@ -60,10 +54,7 @@ def parse_args():
     p.add_argument("--offline", action="store_true",
                    help="Air-gapped: use local cache only, no network (HF_HOME, HF_DATASETS_CACHE)")
     p.add_argument("--watchdog", action="store_true", help="Enable pause.flag callback for watchdog")
-<<<<<<< HEAD
     p.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
-=======
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
     return p.parse_args()
 
 
@@ -88,13 +79,10 @@ def main():
         args.teacher = OPEN_TEACHER
         args.student = OPEN_STUDENT
         print("Using open models (no login):", args.teacher)
- HEAD
     import random as _random
     _random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-=======
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
     device = get_device()
     print(f"Device: {device}")
 
@@ -124,11 +112,7 @@ def main():
     teacher = AutoModelForCausalLM.from_pretrained(
         args.teacher,
         quantization_config=quant_config,
- HEAD
-        dtype=torch.bfloat16,
-=======
         torch_dtype=torch.bfloat16,
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
         device_map="auto",
         cache_dir=cache_dir,
         local_files_only=offline,
@@ -138,11 +122,7 @@ def main():
     # Student
     student = AutoModelForCausalLM.from_pretrained(
         args.student,
-HEAD
-        dtype=torch.bfloat16,
-=======
         torch_dtype=torch.bfloat16,
- 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
         device_map="auto",
         cache_dir=cache_dir,
         local_files_only=offline,
@@ -158,14 +138,11 @@ HEAD
     )
     student = get_peft_model(student, peft_config)
     student.print_trainable_parameters()
-HEAD
     # Transformers 5.x: passing generation kwargs alongside a saved generation_config
     # is deprecated. Reset to a clean config so TRL can set its own kwargs freely.
     from transformers import GenerationConfig
     student.generation_config = GenerationConfig()
 
-=======
-8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
     # Dataset
     ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
     if Path(args.dataset).exists():
@@ -197,7 +174,6 @@ HEAD
     # MiniLLMConfig = GRPOConfig = TrainingArguments (single args object)
     # num_generations must divide train batch; num_generations_eval must divide eval batch
     batch = args.batch_size
-HEAD
     num_generations = 4
     # Approximate total steps so we can set a sensible warmup_steps
     # (warmup_ratio is deprecated in transformers 5.2, use warmup_steps instead)
@@ -206,8 +182,6 @@ HEAD
     _total_steps = _steps_per_epoch * args.epochs * num_generations
     _warmup_steps = max(1, round(0.03 * _total_steps))
 
-=======
-8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
     config = MiniLLMConfig(
         output_dir=args.output_dir,
         do_train=True,
@@ -227,15 +201,10 @@ HEAD
         remove_unused_columns=False,
         max_grad_norm=1.0,
         lr_scheduler_type="cosine",
-HEAD
         warmup_steps=_warmup_steps,
         dataloader_pin_memory=False,   # MPS does not support pin_memory
         max_new_tokens=512,            # avoid clipping 90%+ of completions at 256
         num_generations=num_generations,
-=======
-        warmup_ratio=0.03,
-        num_generations=4,
-8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
         num_generations_eval=4,
         rkl_advantage=True,
         length_normalization=True,
