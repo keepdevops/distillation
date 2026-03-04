@@ -48,9 +48,9 @@ MACTOP_BIN = _find_mactop()
 
 # Fan RPM curve: (temp_c, rpm) pairs — interpolated linearly between points
 FAN_CURVE = [
-    (65,  1200),   # below 65°C: minimum (auto floor)
-    (75,  2500),   # 75°C: start ramping
-    (85,  4000),   # 85°C: high
+    (60,  1200),   # below 60°C: minimum (auto floor)
+    (70,  2500),   # 70°C: start ramping
+    (80,  4000),   # 80°C: high
     (90,  6000),   # 90°C: full speed
 ]
 
@@ -145,8 +145,8 @@ def main():
     ap = argparse.ArgumentParser(description="Monitor CPU/GPU temperature on Apple Silicon")
     ap.add_argument("--interval", "-i", type=float, default=3.0, help="Sample interval (seconds)")
     ap.add_argument("--log", type=str, default=None, help="Append CSV samples to file")
-    ap.add_argument("--fan-threshold", type=float, default=75.0,
-                    help="GPU temp (°C) above which to start ramping fans (default: 75)")
+    ap.add_argument("--fan-threshold", type=float, default=60.0,
+                    help="GPU temp (°C) above which to start ramping fans (default: 60)")
     ap.add_argument("--fan-max-temp", type=float, default=90.0,
                     help="GPU temp (°C) at which fans hit maximum (default: 90)")
     ap.add_argument("--fan-control", action="store_true",
