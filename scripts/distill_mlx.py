@@ -7,6 +7,10 @@ between teacher and student logits. LoRA adapters applied via mlx_lm.tuner.
 
 Same pause.flag protocol and metrics.jsonl format as distill_minillm.py.
 
+Note: MLX has its own optimized kernels and does NOT use Flash Attention or
+torch.compile() (PyTorch-only features). MLX is already optimized for Apple
+Silicon with unified memory and lazy evaluation.
+
 Usage:
   python scripts/distill_mlx.py --open --max_samples 100 --epochs 1
   python scripts/distill_mlx.py --teacher Qwen/Qwen2-1.5B-Instruct \\

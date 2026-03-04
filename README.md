@@ -15,7 +15,7 @@ A bare-metal, **air-gapped** knowledge distillation pipeline for Apple M3 (ARM64
 
 ## Features
 
-- **Three training backends** — PyTorch/MPS (default), MLX (2–5× faster, Apple-native), Unsloth (lowest memory)
+- **Three training backends** — PyTorch/MPS (default), MLX (2–5× faster, Apple-native), Unsloth (lowest memory) → [Backend Optimization Guide](BACKEND_OPTIMIZATIONS.md)
 - **MiniLLM** (reverse KL) — mode-seeking, high-quality LLM distillation via TRL
 - **Forward KL** — classic distillation for classification (BERT, ResNet)
 - **Air-gapped** — full offline workflow with `conda-pack` and pre-cached models
