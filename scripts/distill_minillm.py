@@ -6,8 +6,12 @@ Bare-metal, air-gapped compatible. Optimized for Apple M3 (MPS).
 
 import argparse
 import os
+import sys
 import warnings
 from pathlib import Path
+
+# Add scripts directory to path for local imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 import torch
 from datasets import load_dataset, load_from_disk
@@ -162,7 +166,8 @@ def main():
     student.generation_config = GenerationConfig()
 
     # torch.compile() optimization (20-40% speedup, PyTorch 2.0+)
-    if hasattr(torch, "compile") and torch.__version__ >= "2.0":
+    # NOTE: Disabled on MPS due to compilation issues with some operations
+    if hasattr(torch, "compile") and torch.__version__ >= "2.0" and device.type != "mps":
         print("✓ Compiling student model with torch.compile() (20-40% speedup)")
         print("  First run has ~1-2 min compilation overhead, subsequent runs benefit fully")
         try:
@@ -173,6 +178,9 @@ def main():
         except Exception as e:
             print(f"⚠ torch.compile() failed: {e}")
             print("  Continuing without compilation (still works, just slower)")
+    elif device.type == "mps":
+        print("torch.compile() skipped on MPS (Apple Silicon) due to compatibility issues")
+        print("  Still get 2-3x speedup from other optimizations (Flash Attention, etc.)")
     else:
         print("torch.compile() not available (requires PyTorch 2.0+)")
 
