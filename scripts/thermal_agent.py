@@ -44,6 +44,7 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Dict, Optional
+import threading
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +65,7 @@ class ThermalAgent:
         hysteresis: float = 5.0,
         interval: int = 30,
         log_file: Optional[str] = None,
+        show_popup: bool = False,
     ):
         """
         Initialize thermal agent.
@@ -75,6 +77,7 @@ class ThermalAgent:
             hysteresis: Temperature delta for auto-resume (default: 5°C)
             interval: Poll interval in seconds (default: 30s)
             log_file: Optional log file for thermal events
+            show_popup: Show fan control GUI popup on high temps (default: False)
         """
         self.watch_dirs = [Path(d).resolve() for d in watch_dirs]
         self.threshold = threshold
@@ -83,8 +86,10 @@ class ThermalAgent:
         self.resume_threshold = threshold - hysteresis
         self.interval = interval
         self.log_file = Path(log_file) if log_file else None
+        self.show_popup = show_popup
         self.paused_jobs = set()  # Track which jobs we've paused
         self.running = True
+        self.popup_shown = False  # Track if popup is already open
 
         # Create watch directories if they don't exist
         for d in self.watch_dirs:
@@ -223,6 +228,32 @@ class ThermalAgent:
         except OSError as e:
             logger.error("Failed to clear pause.flag: %s", e)
 
+    def show_fan_control_popup(self):
+        """Launch fan control GUI popup in background thread."""
+        if self.popup_shown:
+            return  # Popup already open
+
+        def run_popup():
+            try:
+                script_dir = Path(__file__).parent
+                popup_script = script_dir / "fan_control_popup.py"
+                if not popup_script.exists():
+                    logger.warning("fan_control_popup.py not found at: %s", popup_script)
+                    return
+
+                subprocess.run(
+                    [sys.executable, str(popup_script), "--threshold", str(self.threshold)],
+                    check=False,
+                )
+                self.popup_shown = False  # Reset when popup closes
+            except Exception as e:
+                logger.error("Failed to launch fan control popup: %s", e)
+                self.popup_shown = False
+
+        self.popup_shown = True
+        thread = threading.Thread(target=run_popup, daemon=True)
+        thread.start()
+
     def tick(self):
         """Run one monitoring cycle."""
         temp = self.read_thermal()
@@ -235,6 +266,12 @@ class ThermalAgent:
         if temp >= self.threshold:
             for job_dir in self.watch_dirs:
                 self.set_pause_flag(job_dir, temp)
+
+            # Show fan control popup if enabled
+            if self.show_popup and not self.popup_shown:
+                logger.info("🌡️  Launching fan control popup (temp=%.1f°C)", temp)
+                self.show_fan_control_popup()
+
             return
 
         # Check if we should resume jobs
@@ -413,6 +450,11 @@ Metrics:
         action="store_true",
         help="Run one check and exit (for testing)",
     )
+    parser.add_argument(
+        "--show-popup",
+        action="store_true",
+        help="Show fan control GUI popup when temperature exceeds threshold",
+    )
 
     args = parser.parse_args()
 
@@ -438,6 +480,7 @@ Metrics:
         hysteresis=args.hysteresis,
         interval=args.interval,
         log_file=args.log,
+        show_popup=args.show_popup,
     )
 
     # Run once or continuous
