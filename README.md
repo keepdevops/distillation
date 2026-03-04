@@ -1,3 +1,4 @@
+ HEAD
 # Knowledge Distillation Toolkit
 
 **Compress large language models with high-quality transfer on Apple M3**
@@ -217,3 +218,6 @@ Best order: **Prune → Distill → Quantize (P-KD-Q)**. Distillation first prod
 ## License
 
 MIT
+=======
+# distillation
+>>>>>>> 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d

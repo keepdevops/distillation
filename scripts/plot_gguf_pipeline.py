@@ -62,6 +62,7 @@ def load_metrics(output_dir):
     return [rows_by_step[s] for s in sorted(rows_by_step)]
 
 
+HEAD
 def find_model_artifacts(output_dir):
     """
     Scan output_dir for distillation artifacts: .gguf, .mlpackage, MLX .npz weights.
@@ -111,6 +112,20 @@ def find_gguf_files(output_dir):
     ]
 
 
+=======
+def find_gguf_files(output_dir):
+    """
+    Scan output_dir only for .gguf distillation artifacts.
+    Returns list of (name, size_gb, path).
+    """
+    root = Path(output_dir)
+    results = []
+    for p in sorted(root.glob("*.gguf")):
+        size_gb = p.stat().st_size / (1024 ** 3)
+        results.append((p.name, size_gb, str(p)))
+    return results
+
+8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
 def benchmark_gguf(gguf_path, n_tokens=50):
     """
     Run a short inference benchmark using llama_cpp.
@@ -147,8 +162,12 @@ def plot_pipeline(output_dir, out_file=None):
     """
     output_dir = Path(output_dir)
     rows = load_metrics(output_dir)
+HEAD
     all_artifacts = find_model_artifacts(output_dir)
     gguf_files = [(n, s, p) for n, s, p, k in all_artifacts if k == "gguf"]
+=======
+    gguf_files = find_gguf_files(output_dir)
+8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     fig.suptitle(f"Pipeline Summary: {output_dir.name}", fontsize=13, fontweight="bold")
@@ -190,7 +209,7 @@ def plot_pipeline(output_dir, out_file=None):
         ax01.plot(eval_steps, perp_vals, "m-o", markersize=5)
     else:
         _no_data_text(ax01, "No eval data")
-
+HEAD
     # ── [1,0] Model artifact sizes (GGUF + CoreML + MLX) ─────────────────────
     ax10 = axes[1, 0]
     ax10.set_title("Model Artifacts", fontsize=10)
@@ -206,11 +225,25 @@ def plot_pipeline(output_dir, out_file=None):
         colors = [kind_colors.get(k, "gray") for k in kinds]
         y_pos = range(len(names))
         bars = ax10.barh(list(y_pos), sizes, color=colors, alpha=0.8)
+=======
+    # ── [1,0] GGUF artifact sizes ─────────────────────────────────────────────
+    ax10 = axes[1, 0]
+    ax10.set_title("GGUF Artifacts", fontsize=10)
+    ax10.set_xlabel("Size (GB)")
+    ax10.grid(True, alpha=0.3, axis="x")
+
+    if gguf_files:
+        names = [f[0] for f in gguf_files]
+        sizes = [f[1] for f in gguf_files]
+        y_pos = range(len(names))
+        bars = ax10.barh(y_pos, sizes, color="steelblue", alpha=0.8)
+8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
         ax10.set_yticks(list(y_pos))
         ax10.set_yticklabels(names, fontsize=8)
         for bar, size in zip(bars, sizes):
             ax10.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height() / 2,
                       f"{size:.2f} GB", va="center", fontsize=8)
+HEAD
         # Legend
         from matplotlib.patches import Patch
         legend_els = [Patch(facecolor=c, label=k.upper()) for k, c in kind_colors.items()
@@ -219,6 +252,10 @@ def plot_pipeline(output_dir, out_file=None):
             ax10.legend(handles=legend_els, fontsize=7, loc="lower right")
     else:
         _no_data_text(ax10, "No artifacts found\n(.gguf / .mlpackage / MLX)")
+=======
+    else:
+        _no_data_text(ax10, "No .gguf files found")
+8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
 
     # ── [1,1] Inference speed ─────────────────────────────────────────────────
     ax11 = axes[1, 1]

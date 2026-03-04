@@ -29,9 +29,15 @@ DEFAULT_RULES = {
     },
     "thermal": {
         "enabled": False,
+HEAD
         # M3 Max: real °C via mactop (no sudo). Peak observed: ~57°C GPU, ~50°C CPU.
         "pause_if_over": 90,      # °C — well above observed training peaks
         "metric": "soc_temp_c",   # "soc_temp_c" | "cpu_temp_c" | "gpu_temp_c" | "total_power_w"
+=======
+        # M3: no raw °C via powermetrics. Use cpu_power_mw or thermal_pressure.
+        "pause_if_over": 18000,   # mW (18W CPU) — M3 Max under heavy load
+        "metric": "cpu_power_mw",  # "cpu_power_mw" | "thermal_pressure"
+8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
     },
     "validator": {
         "backup_before_write": True,
@@ -119,6 +125,7 @@ def write_suggestions(output_dir, suggestions, rules):
 
 def check_thermal(rules):
     """
+HEAD
     Read thermal metric on Apple Silicon M3 Max via mactop (no sudo required).
     Supported metrics: soc_temp_c, cpu_temp_c, gpu_temp_c, cpu_power_w, gpu_power_w, total_power_w
     """
@@ -153,15 +160,54 @@ def check_thermal(rules):
         if value is None:
             return None
         # Legacy: if metric was cpu_power_mw, convert W → mW for threshold compatibility
-        if metric == "cpu_power_mw":
-            return value * 1000
+        if metric == "cpu_power_mw":            return value * 1000
         return value
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, _json.JSONDecodeError, KeyError, IndexError) as e:
+=======
+    Read thermal-related metric on Apple Silicon (M1/M2/M3).
+    powermetrics requires sudo; use: sudo visudo → user ALL=(ALL) NOPASSWD: /usr/bin/powermetrics
+    """
+    thermal_cfg = rules.get("thermal", {})
+    metric = thermal_cfg.get("metric", "cpu_power_mw")
+
+    try:
+        if metric == "thermal_pressure":
+            # Thermal pressure 0–100 (aggregate throttling signal)
+            proc = subprocess.run(
+                ["/usr/bin/powermetrics", "-s", "thermal", "-i", "1", "-n", "1"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if proc.returncode != 0:
+                return None
+            # Parse "Thermal pressure: X" or similar
+            m = re.search(r"[Tt]hermal\s*(?:pressure|state)[:\s]+(\d+)", proc.stdout)
+            if m:
+                return int(m.group(1))
+            return None
+
+        # Default: CPU power (mW) — correlates with heat on M-series
+        proc = subprocess.run(
+            ["/usr/bin/powermetrics", "-n", "1", "--samplers", "cpu_power"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode != 0:
+            return None
+        m = re.search(r"CPU Power:\s*(\d+)\s*mW", proc.stdout)
+        if m:
+            return int(m.group(1))
+        return None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
         logger.debug("check_thermal failed: %s", e)
         return None
 
 
 def run_tick(output_dir, rules, dry_run=False):
+HEAD
     # Thermal check runs unconditionally — does not require trainer_state.json
     if rules["thermal"]["enabled"]:
         value = check_thermal(rules)
@@ -180,6 +226,8 @@ def run_tick(output_dir, rules, dry_run=False):
             t_str = f"{value:.1f}" if value is not None else "n/a"
             logger.debug("thermal: %s°C (ok)", t_str)
 
+=======
+8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
     state = load_trainer_state(output_dir)
     if not state:
         return
@@ -205,11 +253,32 @@ def run_tick(output_dir, rules, dry_run=False):
             current["at_step"] = step
             current["last_losses"] = losses[-5:]
             updated = True
+HEAD
             logger.info("step=%s action=%s reason=%s", step, current.get("action"), current.get("reason"))
+=======
+
+    # Thermal rule (M3: cpu_power_mw or thermal_pressure via powermetrics)
+    if rules["thermal"]["enabled"]:
+        value = check_thermal(rules)
+        if value is not None and value >= rules["thermal"]["pause_if_over"]:
+            pause_path = Path(output_dir) / "pause.flag"
+            if not pause_path.exists():
+                metric = rules["thermal"].get("metric", "cpu_power_mw")
+                payload = {"reason": "thermal", "value": value, "metric": metric}
+                pause_path.write_text(json.dumps(payload))
+                current["action"] = "pause"
+                current["reason"] = "thermal"
+                current["thermal_value"] = value
+                updated = True
+8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
 
     if updated and not dry_run:
         try:
             write_suggestions(output_dir, current, rules)
+HEAD
+=======
+            logger.info("step=%s action=%s reason=%s", step, current.get("action"), current.get("reason"))
+8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
         except OSError as e:
             logger.error("write_suggestions failed: %s", e)
 
