@@ -11,5 +11,6 @@
   "epochs": 2,
   "max_samples": 2000,
   "temperature": 1.0,
-  "lora_r": 64
+  "lora_r": 64,
+  "eval_steps": 2
 }

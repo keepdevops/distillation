@@ -49,7 +49,7 @@ def parse_args():
     p.add_argument("--use_4bit_teacher", action="store_true")
     p.add_argument("--minillm_temp", type=float, default=1.0, help="KD temperature")
     p.add_argument("--max_samples", type=int, default=2000, help="Max train samples (for quick runs)")
-    p.add_argument("--eval_steps", type=int, default=50, help="Run eval every N steps")
+    p.add_argument("--eval_steps", type=int, default=2, help="Run eval every N steps (default: 2 for speed, use 1 for detailed curves)")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true",
                    help="Air-gapped: use local cache only, no network (HF_HOME, HF_DATASETS_CACHE)")
@@ -109,10 +109,21 @@ def main():
             bnb_4bit_use_double_quant=True,
         )
 
+    # Detect Flash Attention 2 support (2-3x speedup)
+    use_flash_attn = False
+    try:
+        import flash_attn
+        use_flash_attn = True
+        print("✓ Flash Attention 2 detected, enabling (2-3x speedup)")
+    except ImportError:
+        print("Flash Attention 2 not available. Install for 2-3x speedup:")
+        print("  pip install flash-attn --no-build-isolation")
+
     teacher = AutoModelForCausalLM.from_pretrained(
         args.teacher,
         quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2" if use_flash_attn else "eager",
         device_map="auto",
         cache_dir=cache_dir,
         local_files_only=offline,
@@ -123,6 +134,7 @@ def main():
     student = AutoModelForCausalLM.from_pretrained(
         args.student,
         torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2" if use_flash_attn else "eager",
         device_map="auto",
         cache_dir=cache_dir,
         local_files_only=offline,
@@ -142,6 +154,21 @@ def main():
     # is deprecated. Reset to a clean config so TRL can set its own kwargs freely.
     from transformers import GenerationConfig
     student.generation_config = GenerationConfig()
+
+    # torch.compile() optimization (20-40% speedup, PyTorch 2.0+)
+    if hasattr(torch, "compile") and torch.__version__ >= "2.0":
+        print("✓ Compiling student model with torch.compile() (20-40% speedup)")
+        print("  First run has ~1-2 min compilation overhead, subsequent runs benefit fully")
+        try:
+            # Use reduce-overhead mode for best training performance
+            student = torch.compile(student, mode="reduce-overhead")
+            # Also compile teacher for generation speedup
+            teacher = torch.compile(teacher, mode="reduce-overhead")
+        except Exception as e:
+            print(f"⚠ torch.compile() failed: {e}")
+            print("  Continuing without compilation (still works, just slower)")
+    else:
+        print("torch.compile() not available (requires PyTorch 2.0+)")
 
     # Dataset
     ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
