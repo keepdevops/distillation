@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Autonomous training monitor: deterministic rules, no agent hallucination.
-Watches trainer_state.json for loss plateau, optionally thermal; writes
-suggestions + pause.flag. Designed for LaunchAgent (survives reboot).
+Autonomous training monitor: ML-specific progress monitoring.
+
+Watches trainer_state.json for loss plateau; writes suggestions + pause.flag.
+Designed for LaunchAgent (survives reboot).
+
+Note: For thermal control, use the standalone thermal_agent.py instead.
+This script focuses on ML-specific monitoring (plateau detection).
 """
 
 import argparse
 import json
 import logging
 import os
-import re
 import shutil
-import subprocess
 import time
 from pathlib import Path
 
@@ -20,18 +22,13 @@ logger = logging.getLogger(__name__)
 
 
 # Default rules (overridable via --config)
+# Note: Thermal control moved to standalone thermal_agent.py
 DEFAULT_RULES = {
     "plateau": {
         "window": 3,           # last N loss deltas
         "max_delta": 0.001,    # if all deltas < this = plateau
         "min_points": 5,       # need at least N loss points
         "lr_scale": 0.8,      # multiply LR by this on plateau
-    },
-    "thermal": {
-        "enabled": False,
-        # M3 Max: real °C via mactop (no sudo). Peak observed: ~57°C GPU, ~50°C CPU.
-        "pause_if_over": 90,      # °C — well above observed training peaks
-        "metric": "soc_temp_c",   # "soc_temp_c" | "cpu_temp_c" | "gpu_temp_c" | "total_power_w"
     },
     "validator": {
         "backup_before_write": True,
@@ -117,69 +114,12 @@ def write_suggestions(output_dir, suggestions, rules):
     tmp.rename(target)
 
 
-def check_thermal(rules):
-    """
-    Read thermal metric on Apple Silicon M3 Max via mactop (no sudo required).
-    Supported metrics: soc_temp_c, cpu_temp_c, gpu_temp_c, cpu_power_w, gpu_power_w, total_power_w
-    """
-    import json as _json
-    thermal_cfg = rules.get("thermal", {})
-    metric = thermal_cfg.get("metric", "soc_temp_c")
-
-    # Map config metric names to mactop JSON keys
-    key_map = {
-        "soc_temp_c": "soc_temp",
-        "cpu_temp_c": "cpu_temp",
-        "gpu_temp_c": "gpu_temp",
-        "cpu_power_w": "cpu_power",
-        "gpu_power_w": "gpu_power",
-        "total_power_w": "total_power",
-        # legacy names
-        "cpu_power_mw": "cpu_power",
-    }
-    mactop_key = key_map.get(metric, "soc_temp")
-
-    try:
-        proc = subprocess.run(
-            ["mactop", "--headless", "--format", "json", "--count", "1"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if proc.returncode != 0:
-            return None
-        data = _json.loads(proc.stdout)
-        value = data[0]["soc_metrics"].get(mactop_key)
-        if value is None:
-            return None
-        # Legacy: if metric was cpu_power_mw, convert W -> mW for threshold compatibility
-        if metric == "cpu_power_mw":
-            return value * 1000
-        return value
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, _json.JSONDecodeError, KeyError, IndexError) as e:
-        logger.debug("check_thermal failed: %s", e)
-        return None
-
-
 def run_tick(output_dir, rules, dry_run=False):
-    # Thermal check runs unconditionally — does not require trainer_state.json
-    if rules["thermal"]["enabled"]:
-        value = check_thermal(rules)
-        if value is not None and value >= rules["thermal"]["pause_if_over"]:
-            pause_path = Path(output_dir) / "pause.flag"
-            if not pause_path.exists():
-                metric = rules["thermal"].get("metric", "soc_temp_c")
-                payload = {"reason": "thermal", "value": value, "metric": metric}
-                if not dry_run:
-                    pause_path.write_text(json.dumps(payload))
-                logger.warning("THERMAL PAUSE: %s=%.1f >= %.1f — wrote pause.flag",
-                               metric, value, rules["thermal"]["pause_if_over"])
-            else:
-                logger.debug("thermal: %.1f°C (pause.flag already exists)", value)
-        else:
-            t_str = f"{value:.1f}" if value is not None else "n/a"
-            logger.debug("thermal: %s°C (ok)", t_str)
+    """
+    Monitor training progress and write suggestions.
 
+    Note: Thermal monitoring removed - use thermal_agent.py for system-wide thermal control.
+    """
     state = load_trainer_state(output_dir)
     if not state:
         return
@@ -215,7 +155,10 @@ def run_tick(output_dir, rules, dry_run=False):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Training watchdog: plateau/thermal rules")
+    p = argparse.ArgumentParser(
+        description="Training watchdog: ML-specific progress monitoring (plateau detection). "
+                    "For thermal control, use thermal_agent.py instead."
+    )
     p.add_argument("output_dir", type=str, help="Training output dir (trainer_state.json)")
     p.add_argument("--interval", type=int, default=60, help="Poll interval seconds")
     p.add_argument("--config", type=str, default=None, help="JSON rules file")
