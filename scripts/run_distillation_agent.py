@@ -546,8 +546,10 @@ def main():
             LOG.warning("Perplexity eval failed (non-fatal): %s", e)
 
     # ── 4. Quality eval (diversity + LLM-as-judge) ───────────────────────────────
+    # NOTE: Quality eval only runs on winner (output_dir points to best trial after line 490)
+    # This saves 5-10 min per non-winning trial (~20-40 min for 5-trial runs)
     if not args.skip_eval and not args.skip_judge:
-        LOG.info("Running quality eval (diversity + judge)...")
+        LOG.info("Running quality eval (diversity + judge) on winning model...")
         quality_cmd = [sys.executable, "scripts/eval_quality.py", str(output_dir)]
         if args.open:
             quality_cmd += ["--student", "Qwen/Qwen2-0.5B-Instruct"]

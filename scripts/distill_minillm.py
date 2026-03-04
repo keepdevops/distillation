@@ -43,8 +43,8 @@ def parse_args():
     p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca")
     p.add_argument("--output_dir", type=str, default="./distilled-minillm")
     p.add_argument("--epochs", type=int, default=2)
-    p.add_argument("--batch_size", type=int, default=4)
-    p.add_argument("--grad_acc", type=int, default=16)
+    p.add_argument("--batch_size", type=int, default=8, help="Physical batch size (default: 8, optimized for M3 Max)")
+    p.add_argument("--grad_acc", type=int, default=8, help="Gradient accumulation steps (default: 8, effective batch = 64)")
     p.add_argument("--lora_r", type=int, default=64)
     p.add_argument("--use_4bit_teacher", action="store_true")
     p.add_argument("--minillm_temp", type=float, default=1.0, help="KD temperature")
@@ -129,6 +129,12 @@ def main():
         local_files_only=offline,
     )
     teacher.eval()
+
+    # Clear cache after teacher load (prevent memory fragmentation)
+    if device.type == "mps":
+        torch.mps.empty_cache()
+    elif device.type == "cuda":
+        torch.cuda.empty_cache()
 
     # Student
     student = AutoModelForCausalLM.from_pretrained(
@@ -231,6 +237,8 @@ def main():
         lr_scheduler_type="cosine",
         warmup_steps=_warmup_steps,
         dataloader_pin_memory=False,   # MPS does not support pin_memory
+        dataloader_num_workers=4,      # Parallel data loading (5-10% speedup)
+        dataloader_prefetch_factor=2,  # Pre-load 2 batches per worker
         num_generations=num_generations,
         num_generations_eval=4,
         rkl_advantage=True,
@@ -247,6 +255,13 @@ def main():
         from watchdog_callbacks import PauseFlagCallback
         callbacks.append(PauseFlagCallback(args.output_dir))
 
+    # Early stopping for diverging trials (saves time on bad configs)
+    from early_stopping_callback import EarlyStoppingCallback
+    callbacks.append(EarlyStoppingCallback(
+        check_step=20,              # Check after 20 steps (~2-3 min)
+        divergence_threshold=1.5,   # Stop if loss > baseline × 1.5
+    ))
+
     trainer = MiniLLMTrainer(
         model=student,
         teacher_model=teacher,
@@ -258,6 +273,13 @@ def main():
     )
 
     trainer.train()
+
+    # Clear cache after training (free memory before merge/export)
+    if device.type == "mps":
+        torch.mps.empty_cache()
+    elif device.type == "cuda":
+        torch.cuda.empty_cache()
+
     # Merge LoRA for full-model export (needed for GGUF/llama.cpp)
     trainer.model = trainer.model.merge_and_unload()
     trainer.save_model(args.output_dir)

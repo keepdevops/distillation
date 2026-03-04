@@ -12,5 +12,7 @@
   "max_samples": 2000,
   "temperature": 1.0,
   "lora_r": 64,
-  "eval_steps": 2
+  "eval_steps": 2,
+  "batch_size": 8,
+  "grad_acc": 8
 }
