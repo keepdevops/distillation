@@ -30,6 +30,12 @@ DEFAULT_RULES = {
         "min_points": 5,       # need at least N loss points
         "lr_scale": 0.8,      # multiply LR by this on plateau
     },
+    "divergence": {
+        "window": 3,           # average of last N losses for "current"
+        "threshold": 1.5,      # pause if recent avg > baseline avg × this
+        "baseline_window": 5,  # average of first N losses for baseline
+        "min_points": 8,       # need at least N points before checking
+    },
     "validator": {
         "backup_before_write": True,
         "max_lr_scale": 0.5,   # never suggest LR below 50% of original
@@ -78,6 +84,25 @@ def detect_plateau(losses, rules):
     recent = losses[-(w + 1):]
     deltas = [abs(recent[i + 1] - recent[i]) for i in range(len(recent) - 1)]
     return all(d < max_d for d in deltas)
+
+
+def detect_divergence(losses, rules):
+    """Return (is_diverging, recent_avg, baseline_avg).
+
+    Diverging = recent average loss > early baseline average × threshold.
+    """
+    div = rules.get("divergence", {})
+    window = div.get("window", 3)
+    threshold = div.get("threshold", 1.5)
+    baseline_window = div.get("baseline_window", 5)
+    min_points = div.get("min_points", 8)
+    if len(losses) < min_points:
+        return False, None, None
+    n_base = min(baseline_window, len(losses))
+    baseline = sum(losses[:n_base]) / n_base
+    n_recent = min(window, len(losses))
+    recent_avg = sum(losses[-n_recent:]) / n_recent
+    return recent_avg > baseline * threshold, recent_avg, baseline
 
 
 def read_current_suggestions(output_dir):
@@ -145,6 +170,28 @@ def run_tick(output_dir, rules, dry_run=False):
             current["at_step"] = step
             current["last_losses"] = losses[-5:]
             updated = True
+
+    # Divergence rule — write pause.flag to stop training
+    diverged, recent_avg, baseline_avg = detect_divergence(losses, rules)
+    if diverged:
+        pause_flag = Path(output_dir) / "pause.flag"
+        if not pause_flag.exists():
+            try:
+                pause_flag.touch()
+            except OSError as e:
+                logger.error("Failed to write pause.flag: %s", e)
+        threshold = rules.get("divergence", {}).get("threshold", 1.5)
+        logger.warning(
+            "step=%s DIVERGENCE: recent_avg=%.4f > baseline=%.4f × %.1f — wrote pause.flag",
+            step, recent_avg, baseline_avg, threshold,
+        )
+        current["action"] = "pause"
+        current["reason"] = "divergence"
+        current["at_step"] = step
+        current["recent_avg_loss"] = round(recent_avg, 4)
+        current["baseline_avg_loss"] = round(baseline_avg, 4)
+        current["last_losses"] = losses[-5:]
+        updated = True
 
     if updated and not dry_run:
         try:

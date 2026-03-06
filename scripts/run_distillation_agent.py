@@ -34,12 +34,21 @@ def setup_logging(verbose: bool = False):
 
 
 def run_cmd(cmd: list[str], cwd: Path, env: dict | None = None) -> None:
-    """Run command; raise on non-zero exit."""
+    """Run command with live stdout streaming; raise on non-zero exit."""
     LOG.info("Running: %s", " ".join(cmd))
     env = env or os.environ.copy()
-    r = subprocess.run(cmd, cwd=cwd, env=env)
-    if r.returncode != 0:
-        raise RuntimeError(f"Command failed with exit code {r.returncode}: {' '.join(cmd)}")
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line:
+            LOG.info("[subprocess] %s", line)
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Command failed with exit code {proc.returncode}: {' '.join(cmd)}")
 
 
 def find_llama_cpp(project_root: Path) -> Path | None:
@@ -525,7 +534,8 @@ def main():
         export_mlx_quant(output_dir, project_root, args.q_bits)
 
     # ── 3. Perplexity eval (student vs teacher vs quant) ─────────────────────────
-    if not args.skip_eval:
+    # MLX saves weights as .npz (not HF format) — PyTorch run_eval.py cannot load them
+    if not args.skip_eval and args.backend != "mlx":
         LOG.info("Running perplexity eval...")
         eval_cmd = [sys.executable, "scripts/run_eval.py", str(output_dir)]
         if args.open:

@@ -27,6 +27,10 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
+from data_pipeline import load_dataset_split, format_prompt_full, pretokenize
+
 LOG = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
@@ -55,10 +59,21 @@ def parse_args():
     p.add_argument("--learning_rate", type=float, default=2e-4)
     p.add_argument("--q_bits", type=int, default=4, choices=[4, 8],
                    help="Quantization bits for MLX export (4 or 8)")
+    p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true", help="Air-gapped: local cache only")
     p.add_argument("--watchdog", action="store_true", help="Enable pause.flag monitoring")
     p.add_argument("--no_export", action="store_true", help="Skip MLX quantization export")
     p.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
+    p.add_argument("--topk_logits", type=int, default=50,
+                   help="Top-K teacher logits to keep for distillation (default: 50). "
+                        "Captures >99%% of teacher probability mass at ~300 MB vs 311 GB full vocab.")
+    p.add_argument("--grad_acc", type=int, default=4,
+                   help="Gradient accumulation steps (default: 4, effective batch = batch_size × grad_acc)")
+    p.add_argument("--ce_alpha", type=float, default=0.1,
+                   help="Weight of cross-entropy loss mixed with KD loss (default: 0.1). "
+                        "0 = pure KD, 1 = pure CE. Stabilises training and improves convergence.")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume from the last saved epoch checkpoint in output_dir.")
     return p.parse_args()
 
 
@@ -74,35 +89,6 @@ def _check_mlx():
             "Note: MLX is Apple-only (M1/M2/M3 Silicon)."
         )
         return False
-
-
-def _load_dataset(args):
-    """Load dataset, respecting offline/air-gapped mode."""
-    if args.offline or os.environ.get("HF_DATASETS_OFFLINE") == "1":
-        cache_candidates = [
-            Path("datasets_cache") / args.dataset.replace("/", "___"),
-            Path("scripts/datasets_cache") / args.dataset.replace("/", "___"),
-        ]
-        for c in cache_candidates:
-            if c.exists():
-                from datasets import load_from_disk
-                LOG.info("Loading dataset from disk: %s", c)
-                return load_from_disk(str(c))
-        raise FileNotFoundError(
-            "Offline mode: dataset not found in cache. Run scripts/cache_datasets.py first."
-        )
-
-    from datasets import load_dataset
-    LOG.info("Loading dataset: %s", args.dataset)
-    return load_dataset(args.dataset)
-
-
-def _format_prompt(example):
-    prompt = example.get("instruction", example.get("prompt", ""))
-    if example.get("input"):
-        prompt += "\n\nInput: " + example["input"]
-    output = example.get("output", example.get("response", ""))
-    return prompt + "\n\n### Response:\n" + output
 
 
 def _check_pause_flag(output_dir: Path) -> bool:
@@ -140,22 +126,28 @@ def _write_trainer_state(state_path: Path, log_history: list):
     tmp.replace(state_path)  # atomic replace
 
 
-def _tokenize_batch(tokenizer, texts, max_length=512):
-    """Tokenize a batch of texts → MLX arrays.
-
-    Accepts either an mlx_lm TokenizerWrapper (uses ._tokenizer) or a plain HF tokenizer.
-    """
+def _add_grads(a, b):
+    """Recursively add two gradient trees (nested dicts/lists of mx.arrays)."""
     import mlx.core as mx
-    # mlx_lm returns a TokenizerWrapper; unwrap to the underlying HF tokenizer
-    hf_tok = getattr(tokenizer, "_tokenizer", tokenizer)
-    enc = hf_tok(
-        texts,
-        return_tensors="np",
-        padding="max_length",
-        truncation=True,
-        max_length=max_length,
-    )
-    return mx.array(enc["input_ids"]), mx.array(enc["attention_mask"])
+    if isinstance(a, mx.array):
+        return a + b
+    if isinstance(a, dict):
+        return {k: _add_grads(a[k], b[k]) for k in a}
+    if isinstance(a, list):
+        return [_add_grads(x, y) for x, y in zip(a, b)]
+    return a
+
+
+def _scale_grads(g, scale):
+    """Recursively scale a gradient tree by a scalar."""
+    import mlx.core as mx
+    if isinstance(g, mx.array):
+        return g * scale
+    if isinstance(g, dict):
+        return {k: _scale_grads(v, scale) for k, v in g.items()}
+    if isinstance(g, list):
+        return [_scale_grads(x, scale) for x in g]
+    return g
 
 
 def main():
@@ -210,96 +202,194 @@ def main():
     LOG.info("LoRA applied: %d trainable parameter tensors.", len(trainable))
 
     # ── Dataset ─────────────────────────────────────────────────────────────────
-    ds = _load_dataset(args)
-    train_split = ds["train"] if hasattr(ds, "__getitem__") and "train" in ds else ds
-    if args.max_samples and len(train_split) > args.max_samples:
-        train_split = train_split.select(range(args.max_samples))
+    ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
+    LOG.info("Loading dataset: %s", args.dataset)
+    train_split = load_dataset_split(args.dataset, args.max_samples, ds_cache, args.offline)
     LOG.info("Train samples: %d", len(train_split))
 
-    texts = [_format_prompt(ex) for ex in train_split]
+    texts = [format_prompt_full(ex) for ex in train_split]
 
-    # ── Optimizer ───────────────────────────────────────────────────────────────
-    optimizer = optim.AdamW(learning_rate=args.learning_rate)
+    # ── Pre-tokenize entire dataset once ────────────────────────────────────────
+    LOG.info("Pre-tokenizing %d samples...", len(texts))
+    all_input_ids, all_attention_mask = pretokenize(student_tokenizer, texts)
+    n_samples = len(texts)
+    seq_len = all_input_ids.shape[1]
+    LOG.info("Pre-tokenization complete.")
 
-    # ── KD loss (forward KL) — defined as a module method for value_and_grad ────
-    def kd_loss(model, input_ids, attention_mask, teacher_logits_frozen):
-        """Forward KL: KL(teacher || student) per masked token."""
+    # ── Pre-compute teacher top-K logits for ALL samples ─────────────────────────
+    # Teacher is frozen + dataset is fixed → compute once, reuse every epoch.
+    # Storing top-K=50 indices+values uses ~300 MB vs 311 GB for the full vocab.
+    K = args.topk_logits
+    all_teacher_topk_values = np.zeros((n_samples, seq_len, K), dtype=np.float16)
+    all_teacher_topk_indices = np.zeros((n_samples, seq_len, K), dtype=np.int32)
+
+    LOG.info("Pre-computing teacher top-%d logits for %d samples...", K, n_samples)
+    for precomp_start in range(0, n_samples, args.batch_size):
+        precomp_end = min(precomp_start + args.batch_size, n_samples)
+        batch_ids = mx.array(all_input_ids[precomp_start:precomp_end])
+        t_out = teacher_model(batch_ids)
+        t_logits = t_out if isinstance(t_out, mx.array) else t_out.logits  # (B, T, V)
+        mx.eval(t_logits)
+        topk_idx = mx.argsort(-t_logits, axis=-1)[..., :K]           # (B, T, K)
+        topk_val = mx.take_along_axis(t_logits, topk_idx, axis=-1)   # (B, T, K)
+        mx.eval(topk_idx, topk_val)
+        all_teacher_topk_values[precomp_start:precomp_end] = np.array(topk_val.astype(mx.float32)).astype(np.float16)
+        all_teacher_topk_indices[precomp_start:precomp_end] = np.array(topk_idx.astype(mx.int32))
+        if precomp_end % max(args.batch_size * 10, 1) == 0 or precomp_end == n_samples:
+            LOG.info("  Teacher logits: %d/%d samples", precomp_end, n_samples)
+
+    cache_mb = (all_teacher_topk_values.nbytes + all_teacher_topk_indices.nbytes) / 1e6
+    LOG.info("Teacher top-%d logits cached (%.0f MB).", K, cache_mb)
+
+    # Free teacher from memory — logits are fully cached, teacher not needed during training
+    del teacher_model
+    mx.clear_cache()
+
+    # Eval setup — first 32 samples, using pre-computed top-K (no teacher forward at eval time)
+    eval_size = min(32, n_samples)
+    eval_ids = mx.array(all_input_ids[:eval_size])
+    eval_mask = mx.array(all_attention_mask[:eval_size])
+    eval_topk_values = mx.array(all_teacher_topk_values[:eval_size].astype(np.float32))
+    eval_topk_indices = mx.array(all_teacher_topk_indices[:eval_size])
+
+    # ── Optimizer with linear warmup + cosine decay ──────────────────────────────
+    # Compute total_steps here so the LR schedule can be sized correctly.
+    _macro = args.batch_size * args.grad_acc
+    _steps_per_epoch = max(1, n_samples // _macro)
+    _total_steps = args.epochs * _steps_per_epoch
+    _warmup_steps = max(1, int(0.03 * _total_steps))
+    _cosine_steps = max(1, _total_steps - _warmup_steps)
+    warmup_sched = optim.linear_schedule(1e-7, args.learning_rate, _warmup_steps)
+    cosine_sched = optim.cosine_decay(args.learning_rate, _cosine_steps)
+    lr_schedule = optim.join_schedules([warmup_sched, cosine_sched], [_warmup_steps])
+    optimizer = optim.AdamW(learning_rate=lr_schedule)
+    LOG.info("LR schedule: warmup %d steps → cosine decay over %d steps", _warmup_steps, _cosine_steps)
+
+    # ── KD loss: forward KL (top-K sparse) + optional CE ────────────────────────
+    def kd_loss(model, input_ids, attention_mask, t_topk_values, t_topk_indices):
+        """Mixed loss: ce_alpha * CE + (1 - ce_alpha) * forward-KL.
+
+        t_topk_values:  (B, T, K) float32 — raw teacher logits at top-K vocab positions
+        t_topk_indices: (B, T, K) int32   — vocab indices of those K positions
+
+        CE term: next-token prediction loss (student predicts input_ids[t+1] at step t).
+        KD term: forward KL between teacher's truncated top-K distribution and student.
+        Mixing with ce_alpha ∈ [0, 1] (default 0.1) prevents mode collapse and
+        stabilises early training.
+        """
         s_out = model(input_ids)
-        s_logits = (s_out if isinstance(s_out, mx.array) else s_out.logits) / args.kd_temp
+        s_logits = s_out if isinstance(s_out, mx.array) else s_out.logits       # (B, T, V)
 
-        t_logits = teacher_logits_frozen / args.kd_temp
+        # ── KD term ──────────────────────────────────────────────────────────────
+        s_log_probs = nn.log_softmax(s_logits / args.kd_temp, axis=-1)          # (B, T, V)
+        s_log_probs_topk = mx.take_along_axis(s_log_probs, t_topk_indices, axis=-1)  # (B, T, K)
+        t_probs = nn.softmax(t_topk_values / args.kd_temp, axis=-1)             # (B, T, K)
+        mask = attention_mask[..., None].astype(mx.float32)                      # (B, T, 1)
+        kl = (t_probs * (mx.log(t_probs + 1e-9) - s_log_probs_topk)) * mask
+        kd = kl.sum(axis=-1).mean()
 
-        s_log_probs = nn.log_softmax(s_logits, axis=-1)
-        t_probs = nn.softmax(t_logits, axis=-1)
+        if args.ce_alpha == 0.0:
+            return kd
 
-        # Forward KL: sum over vocab
-        mask = attention_mask[..., None].astype(mx.float32)
-        kl = (t_probs * (mx.log(t_probs + 1e-9) - s_log_probs)) * mask
-        return kl.sum(axis=-1).mean()
+        # ── CE term: next-token prediction ───────────────────────────────────────
+        ce_logits  = s_logits[:, :-1]                                            # (B, T-1, V)
+        ce_targets = input_ids[:, 1:][..., None]                                 # (B, T-1, 1)
+        ce_mask    = attention_mask[:, 1:].astype(mx.float32)                    # (B, T-1)
+        ce_log_p   = nn.log_softmax(ce_logits, axis=-1)                          # (B, T-1, V)
+        ce_nll     = -mx.take_along_axis(ce_log_p, ce_targets, axis=-1).squeeze(-1)  # (B, T-1)
+        ce = (ce_nll * ce_mask).sum() / mx.maximum(ce_mask.sum(), 1.0)
+
+        return args.ce_alpha * ce + (1.0 - args.ce_alpha) * kd
 
     loss_and_grad = nn.value_and_grad(student_model, kd_loss)
 
+    # ── Checkpoint resume ────────────────────────────────────────────────────────
+    checkpoint_path = output_dir / "checkpoint.json"
+    start_epoch = 0
+    global_step = 0
+    if args.resume and checkpoint_path.exists():
+        with open(checkpoint_path) as f:
+            ckpt = json.load(f)
+        start_epoch = ckpt.get("epoch", 0) + 1
+        global_step = ckpt.get("global_step", 0)
+        weights_file = output_dir / "mlx_student_weights.npz"
+        if weights_file.exists():
+            student_model.load_weights(str(weights_file))
+            LOG.info("Resumed from checkpoint: epoch %d  global_step %d",
+                     ckpt.get("epoch", 0), global_step)
+        else:
+            LOG.warning("--resume set but no weights file found; starting fresh.")
+            start_epoch = 0
+            global_step = 0
+
     # ── Training loop ────────────────────────────────────────────────────────────
-    n_samples = len(texts)
     batch_size = args.batch_size
-    steps_per_epoch = max(1, n_samples // batch_size)
+    grad_acc = args.grad_acc
+    macro_batch = batch_size * grad_acc           # samples consumed per optimizer step
+    steps_per_epoch = max(1, n_samples // macro_batch)
     total_steps = args.epochs * steps_per_epoch
 
     LOG.info(
-        "Starting MLX KD training: epochs=%d  steps/epoch=%d  total_steps=%d",
+        "Starting MLX KD training: epochs=%d  steps/epoch=%d  total_steps=%d  "
+        "batch=%d  grad_acc=%d  effective_batch=%d  topk=%d",
         args.epochs, steps_per_epoch, total_steps,
+        batch_size, grad_acc, macro_batch, K,
     )
 
-    global_step = 0
     t0 = time.time()
-    tokenizer = student_tokenizer
-    log_history = []  # accumulates entries for trainer_state.json
+    log_history = []
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         indices = list(range(n_samples))
         random.shuffle(indices)
 
-        for batch_start in range(0, n_samples - batch_size + 1, batch_size):
+        for step_start in range(0, n_samples - macro_batch + 1, macro_batch):
             if args.watchdog and _check_pause_flag(output_dir):
                 LOG.info("Saving student weights before exit.")
                 student_model.save_weights(str(output_dir / "mlx_student_weights.npz"))
                 return
 
-            batch_idx = indices[batch_start: batch_start + batch_size]
-            batch_texts = [texts[i] for i in batch_idx]
-            input_ids, attention_mask = _tokenize_batch(tokenizer, batch_texts)
+            # Accumulate gradients over grad_acc micro-batches
+            accum_grads = None
+            accum_loss = 0.0
+            for acc in range(grad_acc):
+                mini_start = step_start + acc * batch_size
+                mini_idx = indices[mini_start: mini_start + batch_size]
+                input_ids      = mx.array(all_input_ids[mini_idx])
+                attention_mask = mx.array(all_attention_mask[mini_idx])
+                t_topk_v       = mx.array(all_teacher_topk_values[mini_idx].astype(np.float32))
+                t_topk_i       = mx.array(all_teacher_topk_indices[mini_idx])
 
-            # Get teacher logits (frozen — no gradient flows through teacher)
-            t_out = teacher_model(input_ids)
-            teacher_logits = (t_out if isinstance(t_out, mx.array) else t_out.logits)
-            mx.eval(teacher_logits)  # Materialise before student forward
+                loss_val, grads = loss_and_grad(
+                    student_model, input_ids, attention_mask, t_topk_v, t_topk_i
+                )
+                mx.eval(loss_val, grads)
+                accum_loss += float(loss_val) / grad_acc
+                accum_grads = grads if accum_grads is None else _add_grads(accum_grads, grads)
+                mx.eval(accum_grads)
 
-            loss, grads = loss_and_grad(student_model, input_ids, attention_mask, teacher_logits)
-            optimizer.update(student_model, grads)
-            mx.eval(student_model.parameters(), optimizer.state, loss)
+            accum_grads = _scale_grads(accum_grads, 1.0 / grad_acc)
+            optimizer.update(student_model, accum_grads)
+            mx.eval(student_model.parameters(), optimizer.state)
 
             global_step += 1
-            epoch_frac = epoch + batch_start / n_samples
+            epoch_frac = epoch + step_start / n_samples
 
             if global_step % args.log_steps == 0:
                 elapsed = time.time() - t0
-                loss_val = float(loss)
                 LOG.info(
                     "step=%d  epoch=%.2f  loss=%.4f  %.2f steps/s",
-                    global_step, epoch_frac, loss_val,
+                    global_step, epoch_frac, accum_loss,
                     global_step / max(elapsed, 1e-6),
                 )
-                _write_metric(metrics_path, global_step, epoch_frac, loss=loss_val)
-                log_history.append({"step": global_step, "epoch": epoch_frac, "loss": loss_val})
+                _write_metric(metrics_path, global_step, epoch_frac, loss=accum_loss)
+                log_history.append({"step": global_step, "epoch": epoch_frac, "loss": accum_loss})
                 _write_trainer_state(trainer_state_path, log_history)
 
             if global_step % args.eval_steps == 0:
-                eval_texts = texts[:min(32, len(texts))]
-                eval_ids, eval_mask = _tokenize_batch(tokenizer, eval_texts)
-                t_eval = teacher_model(eval_ids)
-                t_eval_logits = (t_eval if isinstance(t_eval, mx.array) else t_eval.logits)
-                mx.eval(t_eval_logits)
-                eval_loss, _ = loss_and_grad(student_model, eval_ids, eval_mask, t_eval_logits)
+                eval_loss, _ = loss_and_grad(
+                    student_model, eval_ids, eval_mask, eval_topk_values, eval_topk_indices
+                )
                 mx.eval(eval_loss)
                 eval_loss_val = float(eval_loss)
                 LOG.info("  eval_loss=%.4f", eval_loss_val)
@@ -309,6 +399,13 @@ def main():
 
             if global_step >= total_steps:
                 break
+
+        # Save epoch checkpoint (enables --resume on crash/interrupt)
+        student_model.save_weights(str(output_dir / "mlx_student_weights.npz"))
+        with open(checkpoint_path, "w") as f:
+            json.dump({"epoch": epoch, "global_step": global_step}, f)
+        LOG.info("Checkpoint saved: epoch=%d  global_step=%d", epoch, global_step)
+
         if global_step >= total_steps:
             break
 

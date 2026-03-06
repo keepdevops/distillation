@@ -23,11 +23,16 @@ import json
 import logging
 import math
 import os
+import sys
 from pathlib import Path
 
 import torch
-from datasets import Dataset, load_dataset, load_from_disk
+from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Add scripts directory to path for local imports
+sys.path.insert(0, os.path.dirname(__file__))
+from data_pipeline import load_dataset_split
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -77,8 +82,8 @@ def parse_args():
                    help="Discard responses with distinct-2 below this (incoherent/repetitive)")
     p.add_argument("--jaccard_threshold", type=float, default=0.7,
                    help="Discard instructions with Jaccard similarity above this vs existing")
-    p.add_argument("--batch_size", type=int, default=1,
-                   help="Generation batch size (default: 1 — MPS is most stable at 1)")
+    p.add_argument("--batch_size", type=int, default=8,
+                   help="Response generation batch size (default: 8)")
     p.add_argument("--max_new_tokens_instruction", type=int, default=80)
     p.add_argument("--max_new_tokens_response", type=int, default=256)
     p.add_argument("--temperature", type=float, default=0.9,
@@ -135,6 +140,30 @@ def generate_text(model, tokenizer, prompt: str, max_new_tokens: int,
 
 
 @torch.no_grad()
+def batch_generate_texts(model, tokenizer, prompts: list[str], max_new_tokens: int,
+                         temperature: float, device) -> list[str]:
+    """Generate responses for a batch of prompts in one forward pass."""
+    inputs = tokenizer(prompts, return_tensors="pt", truncation=True,
+                       max_length=768, padding=True)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    prompt_len = inputs["input_ids"].shape[1]
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=max_new_tokens,
+        do_sample=True,
+        temperature=temperature,
+        pad_token_id=tokenizer.eos_token_id,
+        repetition_penalty=1.1,
+    )
+    results = []
+    for j, out in enumerate(outputs):
+        input_len = inputs["input_ids"][j].shape[0]
+        text = tokenizer.decode(out[input_len:], skip_special_tokens=True).strip()
+        results.append(text)
+    return results
+
+
+@torch.no_grad()
 def compute_perplexity(model, tokenizer, prompt: str, response: str,
                        max_length: int, device) -> float:
     """Compute teacher perplexity on (prompt, response) — loss over response tokens only."""
@@ -156,15 +185,7 @@ def compute_perplexity(model, tokenizer, prompt: str, response: str,
 def load_seeds(base_dataset: str, max_samples: int, cache_dir: str | None,
                offline: bool) -> list[dict]:
     """Load seed examples from a dataset, extracting instruction + response."""
-    if Path(base_dataset).exists():
-        data = load_from_disk(base_dataset)
-        ds = data["train"] if hasattr(data, "__getitem__") and "train" in data else data
-    else:
-        ds = load_dataset(base_dataset, split="train", cache_dir=cache_dir)
-
-    if max_samples and max_samples < len(ds):
-        ds = ds.select(range(max_samples))
-
+    ds = load_dataset_split(base_dataset, max_samples, cache_dir, offline)
     seeds = []
     for row in ds:
         instr = row.get("instruction", row.get("prompt", "")).strip()
@@ -240,94 +261,108 @@ def main():
         "accepted": 0,
     }
 
-    logger.info("Generating %d synthetic pairs...", args.n_generate)
+    logger.info("Generating %d synthetic pairs (batch_size=%d)...", args.n_generate, args.batch_size)
     attempts = 0
     max_attempts = args.n_generate * 5  # safety cap
+    import re as _re
+    batch_size = max(1, args.batch_size)
 
     while len(accepted) < args.n_generate and attempts < max_attempts:
-        attempts += 1
+        # Phase 1: collect a batch of dedup-validated instructions
+        valid_instructions: list[str] = []
+        valid_resp_prompts: list[str] = []
+        while len(valid_instructions) < batch_size and attempts < max_attempts:
+            attempts += 1
 
-        # 1. Generate instruction
-        seed_block = format_seed_examples(seeds, args.seed_examples)
-        instr_prompt = INSTRUCTION_PROMPT.format(
-            n=args.seed_examples, examples=seed_block,
-        )
-        instruction = generate_text(
-            model, tokenizer, instr_prompt,
-            args.max_new_tokens_instruction, args.temperature, device,
-        )
-        # Clean up: take first line, strip leading bullets/numbers
-        instruction = instruction.split("\n")[0].strip().lstrip("0123456789.-) ")
-        # Truncate at first response-like continuation (teacher starting to answer)
-        import re as _re
-        # Try to extract just the first complete sentence
-        m = _re.match(r'^([^.!?]{15,}[.!?])', instruction)
-        if m:
-            instruction = m.group(1).strip()
-        if not instruction or len(instruction) < 10:
-            continue
-        stats["generated_instructions"] += 1
+            # 1. Generate instruction (always one at a time — each has unique seed context)
+            seed_block = format_seed_examples(seeds, args.seed_examples)
+            instr_prompt = INSTRUCTION_PROMPT.format(
+                n=args.seed_examples, examples=seed_block,
+            )
+            instruction = generate_text(
+                model, tokenizer, instr_prompt,
+                args.max_new_tokens_instruction, args.temperature, device,
+            )
+            # Clean up: take first line, strip leading bullets/numbers
+            instruction = instruction.split("\n")[0].strip().lstrip("0123456789.-) ")
+            m = _re.match(r'^([^.!?]{15,}[.!?])', instruction)
+            if m:
+                instruction = m.group(1).strip()
+            if not instruction or len(instruction) < 10:
+                continue
+            stats["generated_instructions"] += 1
 
-        # 2. Dedup check
-        too_similar = any(
-            jaccard(instruction, ex, n=3) > args.jaccard_threshold
-            for ex in existing_instructions[-200:]  # rolling window for speed
-        )
-        if too_similar:
-            stats["filtered_duplicate"] += 1
-            continue
+            # 2. Dedup check
+            too_similar = any(
+                jaccard(instruction, ex, n=3) > args.jaccard_threshold
+                for ex in existing_instructions[-200:]
+            )
+            if too_similar:
+                stats["filtered_duplicate"] += 1
+                continue
 
-        # 3. Generate response
-        resp_prompt = RESPONSE_PROMPT.format(instruction=instruction)
-        response = generate_text(
-            model, tokenizer, resp_prompt,
+            valid_instructions.append(instruction)
+            valid_resp_prompts.append(RESPONSE_PROMPT.format(instruction=instruction))
+
+        if not valid_instructions:
+            break
+
+        # Phase 2: batch generate responses for validated instructions
+        responses = batch_generate_texts(
+            model, tokenizer, valid_resp_prompts,
             args.max_new_tokens_response, args.temperature, device,
         )
-        if not response:
-            continue
 
-        # 4. Length filter
-        resp_tokens = len(tokenizer.encode(response, add_special_tokens=False))
-        if resp_tokens < args.min_response_tokens or resp_tokens > args.max_response_tokens:
-            stats["filtered_length"] += 1
-            continue
+        # Phase 3: filter each response and accept
+        for instruction, resp_prompt, response in zip(valid_instructions, valid_resp_prompts, responses):
+            if not response:
+                continue
 
-        # 5. Distinct-2 filter
-        d2 = distinct2(response)
-        if d2 < args.min_distinct2:
-            stats["filtered_distinct2"] += 1
-            continue
+            # Length filter
+            resp_tokens = len(tokenizer.encode(response, add_special_tokens=False))
+            if resp_tokens < args.min_response_tokens or resp_tokens > args.max_response_tokens:
+                stats["filtered_length"] += 1
+                continue
 
-        # 6. Perplexity filter
-        ppl = compute_perplexity(
-            model, tokenizer, resp_prompt, response, 768, device,
-        )
-        if ppl < args.ppl_low:
-            stats["filtered_ppl_low"] += 1
-            continue
-        if ppl > args.ppl_high:
-            stats["filtered_ppl_high"] += 1
-            continue
+            # Distinct-2 filter
+            d2 = distinct2(response)
+            if d2 < args.min_distinct2:
+                stats["filtered_distinct2"] += 1
+                continue
 
-        # Accept
-        accepted.append({
-            "instruction": instruction,
-            "input": "",
-            "output": response,
-            "source": "synthetic",
-            "teacher_ppl": round(ppl, 2),
-        })
-        existing_instructions.append(instruction)
-        stats["accepted"] += 1
-
-        if len(accepted) % 100 == 0:
-            logger.info(
-                "  %d/%d accepted  (dup=%d, ppl_low=%d, ppl_high=%d, len=%d, d2=%d)",
-                len(accepted), args.n_generate,
-                stats["filtered_duplicate"], stats["filtered_ppl_low"],
-                stats["filtered_ppl_high"], stats["filtered_length"],
-                stats["filtered_distinct2"],
+            # Perplexity filter
+            ppl = compute_perplexity(
+                model, tokenizer, resp_prompt, response, 768, device,
             )
+            if ppl < args.ppl_low:
+                stats["filtered_ppl_low"] += 1
+                continue
+            if ppl > args.ppl_high:
+                stats["filtered_ppl_high"] += 1
+                continue
+
+            # Accept
+            accepted.append({
+                "instruction": instruction,
+                "input": "",
+                "output": response,
+                "source": "synthetic",
+                "teacher_ppl": round(ppl, 2),
+            })
+            existing_instructions.append(instruction)
+            stats["accepted"] += 1
+
+            if len(accepted) % 100 == 0:
+                logger.info(
+                    "  %d/%d accepted  (dup=%d, ppl_low=%d, ppl_high=%d, len=%d, d2=%d)",
+                    len(accepted), args.n_generate,
+                    stats["filtered_duplicate"], stats["filtered_ppl_low"],
+                    stats["filtered_ppl_high"], stats["filtered_length"],
+                    stats["filtered_distinct2"],
+                )
+
+            if len(accepted) >= args.n_generate:
+                break
 
     logger.info(
         "Generation complete: %d accepted from %d attempts",

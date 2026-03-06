@@ -2,17 +2,24 @@
 """
 Unified Gradio dashboard: training plots + model evaluation.
 Runs locally on 127.0.0.1. Air-gapped friendly.
+Supports PyTorch, MLX, GGUF, and vLLM backends.
 """
 
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import gradio as gr
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+# Add scripts dir to path for universal loader
+sys.path.insert(0, str(Path(__file__).parent))
+from universal_model_loader import UniversalModelLoader, detect_model_format
+from artifact_detector import detect_artifacts
 
 
 def parse_args():
@@ -173,9 +180,10 @@ def on_run_select(run_path):
 
 
 def select_and_load_model(path, model_state):
-    """Load model into model_state; return status string.
+    """Load model into model_state using universal loader; return status string.
 
-    path can be a local directory or a HuggingFace model ID.
+    path can be a local directory, GGUF file, or a HuggingFace model ID.
+    model_state is [loader, backend] where loader is UniversalModelLoader instance.
     """
     import logging
     log = logging.getLogger(__name__)
@@ -185,33 +193,39 @@ def select_and_load_model(path, model_state):
     path = path.strip()
 
     # Determine if it's a local path or HF id
-    is_local = os.path.isdir(path)
+    is_local = os.path.exists(path)
     if is_local:
         path = os.path.abspath(path)
-        config_path = Path(path) / "config.json"
-        if not config_path.exists():
-            log.warning("Model dir missing config.json: %s", path)
-            return f"Invalid: no config.json in {Path(path).name}"
         label = Path(path).name
     else:
-        # Treat as HuggingFace model id
+        # Treat as HuggingFace model id - use PyTorch backend
         label = path
 
     try:
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        local_only = is_local  # only force local_files_only for local paths
-        tok = AutoTokenizer.from_pretrained(path, local_files_only=local_only)
-        model = AutoModelForCausalLM.from_pretrained(
-            path, torch_dtype=torch.bfloat16,
-            device_map="auto" if not torch.backends.mps.is_available() else None,
-            local_files_only=local_only,
-        )
-        if torch.backends.mps.is_available():
-            model = model.to("mps")
-        model_state[0], model_state[1] = model, tok
-        log.info("Loaded model: %s", label)
-        return f"Loaded: {label}"
+        # Create or reuse loader
+        if model_state[0] is None or not isinstance(model_state[0], UniversalModelLoader):
+            loader = UniversalModelLoader()
+            model_state[0] = loader
+        else:
+            loader = model_state[0]
+
+        # Auto-detect format for local paths, use PyTorch for HF ids
+        backend = None if is_local else "pytorch"
+
+        success, message = loader.load(path, backend=backend)
+
+        if success:
+            info = loader.get_info()
+            model_state[1] = info['backend']  # Store backend type
+            log.info("Loaded model: %s (backend: %s)", label, info['backend'])
+            status = f"Loaded: {label}\nBackend: {info['backend']}"
+            if 'device' in info:
+                status += f"\nDevice: {info['device']}"
+            return status
+        else:
+            log.warning("Model load failed %s: %s", path, message)
+            return f"Failed to load '{label}': {message}"
+
     except Exception as e:
         log.warning("Model load failed %s: %s", path, e)
         return f"Failed to load '{label}': {e}"
@@ -343,32 +357,33 @@ def build_eval_ui(runs_dir, model_state):
     judge_state = [None, None]  # [judge_model, judge_tokenizer]
 
     def generate(prompt, max_tokens, temperature):
-        model, tok = model_state[0], model_state[1]
-        if model is None or tok is None:
+        loader = model_state[0]
+        if loader is None or not isinstance(loader, UniversalModelLoader):
+            return "Load a model first.", ""
+        if loader.model is None:
             return "Load a model first.", ""
         if not (prompt or "").strip():
             return "", ""
-        inputs = tok(prompt, return_tensors="pt")
-        if model.device.type in ("mps", "cuda"):
-            inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        out = model.generate(
-            **inputs,
-            max_new_tokens=int(max_tokens or 128),
-            do_sample=True,
-            temperature=float(temperature or 0.7),
-            pad_token_id=tok.eos_token_id,
-        )
-        text = tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        d1, d2, max_rep = _diversity_metrics(text)
-        flag = ""
-        if d1 < 0.5:
-            flag += "  ⚠ low distinct-1 (possible mode collapse)"
-        if max_rep > 5:
-            flag += f"  ⚠ max-rep={max_rep} (repetition loop)"
-        metrics_str = (
-            f"distinct-1: {d1:.3f}  |  distinct-2: {d2:.3f}  |  max-rep: {max_rep}{flag}"
-        )
-        return text, metrics_str
+
+        try:
+            text = loader.generate(
+                prompt,
+                max_tokens=int(max_tokens or 128),
+                temperature=float(temperature or 0.7)
+            )
+
+            d1, d2, max_rep = _diversity_metrics(text)
+            flag = ""
+            if d1 < 0.5:
+                flag += "  ⚠ low distinct-1 (possible mode collapse)"
+            if max_rep > 5:
+                flag += f"  ⚠ max-rep={max_rep} (repetition loop)"
+            metrics_str = (
+                f"distinct-1: {d1:.3f}  |  distinct-2: {d2:.3f}  |  max-rep: {max_rep}{flag}"
+            )
+            return text, metrics_str
+        except Exception as e:
+            return f"Generation error: {str(e)}", ""
 
     def load_judge(judge_path):
         import logging
@@ -501,7 +516,7 @@ def build_eval_ui(runs_dir, model_state):
 
 def main():
     args = parse_args()
-    model_state = [None, None]  # [model, tokenizer]
+    model_state = [None, None]  # [UniversalModelLoader, backend]
     run_dirs = find_run_dirs(args.runs_dir)
     pipeline_dirs = find_pipeline_dirs(args.runs_dir)
     with gr.Blocks(title="Distillation Dashboard") as app:
@@ -661,24 +676,40 @@ def main():
 
                     div = data.get("diversity", {})
                     judge = data.get("judge", {})
+                    gates = data.get("quality_gates", {})
+                    tppl = data.get("teacher_perplexity", {})
+                    n_gen = data.get("n_samples_generated", data.get("n_samples", "?"))
+                    n_pass = data.get("n_samples_passed", "?")
                     lines = [
                         f"Model:       {Path(data.get('model_dir', run_path)).name}",
                         f"Timestamp:   {data.get('timestamp', 'n/a')}",
-                        f"N samples:   {data.get('n_samples', '?')}",
+                        f"Generated:   {n_gen}  |  Passed: {n_pass}"
+                        + (f"  ({gates.get('pass_rate_pct', '?')}%)" if gates.get('pass_rate_pct') else ""),
                         "",
-                        "── Diversity ──────────────────────────",
+                        "── Quality Gates ───────────────────────",
+                        f"  pass rate:      {gates.get('pass_rate_pct', 'n/a')}%",
+                        f"  refusal rate:   {gates.get('refusal_rate_pct', 'n/a')}%",
+                        "",
+                        "── Diversity ───────────────────────────",
                         f"  avg distinct-1:   {div.get('avg_distinct_1', 'n/a')}",
                         f"  avg distinct-2:   {div.get('avg_distinct_2', 'n/a')}",
                         f"  avg max-rep:      {div.get('avg_max_rep', 'n/a')}",
+                        f"  3-gram entropy:   {div.get('ngram_entropy_3', 'n/a')} bits",
                         f"  median length:    {div.get('median_response_tokens', 'n/a')} tokens",
                     ]
+                    if tppl.get("enabled"):
+                        lines += [
+                            "",
+                            "── Teacher PPL on student outputs ──────",
+                            f"  avg teacher ppl:  {tppl.get('avg_teacher_ppl', 'n/a')}",
+                        ]
                     if judge.get("enabled"):
                         lines += [
                             "",
                             "── LLM-as-judge ────────────────────────",
                             f"  teacher:    {judge.get('teacher', 'n/a')}",
                             f"  avg score:  {judge.get('avg_score', 'n/a')} / 10",
-                            f"  scored:     {judge.get('n_scored', 0)} / {data.get('n_samples', '?')}",
+                            f"  scored:     {judge.get('n_scored', 0)} / {n_gen}",
                         ]
                     else:
                         lines.append("\n(Judge not run — rerun with --judge to enable)")

@@ -14,8 +14,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 import torch
-from datasets import load_dataset, load_from_disk
 from peft import LoraConfig, get_peft_model
+
+from data_pipeline import load_dataset_split, format_prompt_only
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -54,6 +55,9 @@ def parse_args():
     p.add_argument("--minillm_temp", type=float, default=1.0, help="KD temperature")
     p.add_argument("--max_samples", type=int, default=2000, help="Max train samples (for quick runs)")
     p.add_argument("--eval_steps", type=int, default=2, help="Run eval every N steps (default: 2 for speed, use 1 for detailed curves)")
+    p.add_argument("--num_generations", type=int, default=4, help="Generations per prompt for MiniLLM (default: 4, lower = faster)")
+    p.add_argument("--max_new_tokens", type=int, default=256, help="Max tokens to generate (default: 256, lower = faster)")
+    p.add_argument("--eval_split", type=float, default=0.02, help="Eval dataset size as fraction of train (default: 0.02 = 2%%)")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true",
                    help="Air-gapped: use local cache only, no network (HF_HOME, HF_DATASETS_CACHE)")
@@ -67,14 +71,6 @@ def get_device():
         return torch.device("mps")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-def format_example(example):
-    """Format as prompt (MiniLLM uses prompts for on-policy generation)."""
-    prompt = example.get("instruction", example.get("prompt", ""))
-    if "input" in example and example["input"]:
-        prompt += "\n\nInput: " + example["input"]
-    prompt += "\n\n### Response:"
-    return {"prompt": prompt}
 
 
 def main():
@@ -186,16 +182,12 @@ def main():
 
     # Dataset
     ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
-    if Path(args.dataset).exists():
-        data = load_from_disk(args.dataset)
-        dataset = data["train"] if isinstance(data, dict) and "train" in data else data
-    else:
-        dataset = load_dataset(args.dataset, split="train", cache_dir=ds_cache)
-        if args.max_samples and args.max_samples < len(dataset):
-            dataset = dataset.select(range(args.max_samples))
-
-    dataset = dataset.map(format_example, remove_columns=dataset.column_names)
-    dataset = dataset.train_test_split(test_size=0.02, seed=42)
+    dataset = load_dataset_split(args.dataset, args.max_samples, ds_cache, offline)
+    dataset = dataset.map(
+        lambda ex: {"prompt": format_prompt_only(ex)},
+        remove_columns=dataset.column_names,
+    )
+    dataset = dataset.train_test_split(test_size=args.eval_split, seed=42)
 
     # MiniLLM config (TRL)
     import logging
@@ -215,7 +207,7 @@ def main():
     # MiniLLMConfig = GRPOConfig = TrainingArguments (single args object)
     # num_generations must divide train batch; num_generations_eval must divide eval batch
     batch = args.batch_size
-    num_generations = 4
+    num_generations = args.num_generations
     # Approximate total steps so we can set a sensible warmup_steps
     # (warmup_ratio is deprecated in transformers 5.2, use warmup_steps instead)
     _train_size = max(1, int(len(dataset["train"])))
@@ -248,7 +240,8 @@ def main():
         dataloader_num_workers=4,      # Parallel data loading (5-10% speedup)
         dataloader_prefetch_factor=2,  # Pre-load 2 batches per worker
         num_generations=num_generations,
-        num_generations_eval=4,
+        num_generations_eval=num_generations,
+        max_new_tokens=args.max_new_tokens,
         rkl_advantage=True,
         length_normalization=True,
         kd_temperature=args.minillm_temp,

@@ -21,13 +21,18 @@ import logging
 import math
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import numpy as np
-from datasets import load_dataset, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Add scripts directory to path for local imports
+sys.path.insert(0, os.path.dirname(__file__))
+from data_pipeline import load_dataset_split, format_prompt_only
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -93,14 +98,6 @@ def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def format_example(example):
-    prompt = example.get("instruction", example.get("prompt", ""))
-    if "input" in example and example["input"]:
-        prompt += "\n\nInput: " + example["input"]
-    prompt += "\n\n### Response:"
-    return {"prompt": prompt, "instruction": example.get("instruction", prompt)}
-
-
 def load_student(checkpoint_dir, student_id, cache_dir, offline, device):
     tok_dir = str(checkpoint_dir) if (checkpoint_dir / "tokenizer_config.json").exists() else student_id
     tokenizer = AutoTokenizer.from_pretrained(tok_dir, cache_dir=cache_dir, local_files_only=offline)
@@ -157,20 +154,6 @@ def mlx_batch_generate(model, tokenizer, prompts, max_new_tokens, temperature):
         responses.append(response)
 
     return responses
-
-
-@torch.no_grad()
-def generate_response(model, tokenizer, prompt, max_new_tokens, temperature, device):
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    out = model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=True,
-        temperature=temperature,
-        pad_token_id=tokenizer.eos_token_id,
-    )
-    return tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
 
 @torch.no_grad()
@@ -411,20 +394,6 @@ def create_umap_visualization(embeddings, categories, output_path):
 
 
 @torch.no_grad()
-def judge_response(judge_model, judge_tok, instruction, response, device):
-    prompt = JUDGE_PROMPT.format(instruction=instruction, response=response)
-    inputs = judge_tok(prompt, return_tensors="pt", truncation=True, max_length=768)
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    out = judge_model.generate(
-        **inputs,
-        max_new_tokens=60,
-        do_sample=False,
-        pad_token_id=judge_tok.eos_token_id,
-    )
-    return judge_tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
-
-
-@torch.no_grad()
 def batch_judge_responses(judge_model, judge_tok, instructions, responses, device, batch_size=8):
     """Judge multiple responses in batches for significant speedup."""
     all_judgments = []
@@ -473,13 +442,27 @@ def compute_teacher_perplexity_on_responses(teacher_model, teacher_tok, prompts,
                             max_length=1024, padding=True)
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
-        outputs = teacher_model(**inputs, labels=inputs["input_ids"])
-        loss = outputs.loss.item()
-        ppl = math.exp(loss) if loss < 10 else float("inf")
+        outputs = teacher_model(**inputs)
+        logits = outputs.logits  # (B, T, V)
 
-        # Approximate per-sample (simplified - full version would need individual losses)
-        for _ in range(len(batch_prompts)):
-            perplexities.append(ppl)
+        # Shift for causal LM: token i predicts token i+1
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = inputs["input_ids"][:, 1:].contiguous()
+        shift_mask = inputs["attention_mask"][:, 1:].float()
+
+        # Per-token CE loss; use attention_mask to exclude padding
+        token_losses = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            reduction="none",
+        ).view(shift_labels.shape)  # (B, T-1)
+
+        # Per-sample mean loss weighted by non-padding tokens
+        token_losses = token_losses * shift_mask
+        sample_losses = token_losses.sum(dim=1) / shift_mask.sum(dim=1).clamp(min=1)
+        for loss_val in sample_losses.tolist():
+            ppl = math.exp(loss_val) if loss_val < 10 else float("inf")
+            perplexities.append(round(ppl, 2))
 
     return perplexities
 
@@ -520,16 +503,14 @@ def main():
     # Load dataset
     ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
     logger.info("Loading dataset: %s", args.dataset)
-    if Path(args.dataset).exists():
-        data = load_from_disk(args.dataset)
-        dataset = data["train"] if isinstance(data, dict) and "train" in data else data
-    else:
-        dataset = load_dataset(args.dataset, split="train", cache_dir=ds_cache)
-
-    if args.max_samples and args.max_samples < len(dataset):
-        dataset = dataset.select(range(args.max_samples))
-
-    dataset = dataset.map(format_example, remove_columns=dataset.column_names)
+    dataset = load_dataset_split(args.dataset, args.max_samples, ds_cache, offline)
+    dataset = dataset.map(
+        lambda ex: {
+            "prompt": format_prompt_only(ex),
+            "instruction": ex.get("instruction", "").strip(),
+        },
+        remove_columns=dataset.column_names,
+    )
     split = dataset.train_test_split(test_size=args.val_size, seed=42)
     val_ds = split["test"]
 

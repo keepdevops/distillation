@@ -28,8 +28,10 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 import torch
-from datasets import Dataset, load_dataset, load_from_disk
+from datasets import Dataset
 from peft import LoraConfig, get_peft_model
+
+from data_pipeline import load_dataset_split, format_prompt_only
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -78,51 +80,37 @@ def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def format_prompt(example) -> str:
-    prompt = example.get("instruction", example.get("prompt", "")).strip()
-    inp = example.get("input", "").strip()
-    if inp:
-        prompt += f"\n\nInput: {inp}"
-    prompt += "\n\n### Response:"
-    return prompt
-
-
-def load_training_data(dataset_path: str, max_samples: int,
-                       cache_dir: str | None, offline: bool) -> list[str]:
-    """Load dataset and return list of prompt strings."""
-    if Path(dataset_path).exists():
-        data = load_from_disk(dataset_path)
-        ds = data["train"] if hasattr(data, "__getitem__") and "train" in data else data
-    else:
-        ds = load_dataset(dataset_path, split="train", cache_dir=cache_dir)
-
-    if max_samples and max_samples < len(ds):
-        ds = ds.select(range(max_samples))
-
-    return [format_prompt(row) for row in ds]
 
 
 @torch.no_grad()
 def generate_labels(teacher_model, tokenizer, prompts: list[str],
-                    max_new_tokens: int, device) -> list[str]:
-    """Generate teacher responses for all prompts. Saves to sft_labels.jsonl."""
+                    max_new_tokens: int, device, batch_size: int = 8) -> list[str]:
+    """Generate teacher responses in batches. Much faster than one-at-a-time."""
     responses = []
-    logger.info("Generating teacher labels for %d prompts...", len(prompts))
-    for i, prompt in enumerate(prompts):
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+    logger.info("Generating teacher labels for %d prompts (batch_size=%d)...", len(prompts), batch_size)
+    for batch_start in range(0, len(prompts), batch_size):
+        batch = prompts[batch_start: batch_start + batch_size]
+        inputs = tokenizer(
+            batch,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+            padding=True,
+        )
         inputs = {k: v.to(device) for k, v in inputs.items()}
+        prompt_len = inputs["input_ids"].shape[1]
         out = teacher_model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,  # greedy for labels — deterministic and higher quality
             pad_token_id=tokenizer.eos_token_id,
         )
-        response = tokenizer.decode(
-            out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
-        ).strip()
-        responses.append(response)
-        if (i + 1) % 100 == 0:
-            logger.info("  Generated %d/%d labels", i + 1, len(prompts))
+        for seq in out:
+            response = tokenizer.decode(seq[prompt_len:], skip_special_tokens=True).strip()
+            responses.append(response)
+        done = min(batch_start + batch_size, len(prompts))
+        if done % 100 == 0 or done == len(prompts):
+            logger.info("  Generated %d/%d labels", done, len(prompts))
     return responses
 
 
@@ -182,7 +170,8 @@ def main():
 
     # Load training prompts
     logger.info("Loading dataset: %s", args.dataset)
-    prompts = load_training_data(args.dataset, args.max_samples, ds_cache, offline)
+    train_ds = load_dataset_split(args.dataset, args.max_samples, ds_cache, offline)
+    prompts = [format_prompt_only(row) for row in train_ds]
     logger.info("Training prompts: %d", len(prompts))
 
     # Generate teacher labels (or load from cache)
@@ -209,7 +198,7 @@ def main():
         teacher.to(device)
         teacher.eval()
 
-        responses = generate_labels(teacher, tokenizer, prompts, args.max_new_tokens, device)
+        responses = generate_labels(teacher, tokenizer, prompts, args.max_new_tokens, device, batch_size=args.batch_size)
 
         # Cache labels
         with open(labels_path, "w") as f:

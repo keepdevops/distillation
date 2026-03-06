@@ -24,6 +24,10 @@ import os
 import sys
 from pathlib import Path
 
+import numpy as np
+
+from data_pipeline import load_dataset_split, format_prompt_full, pretokenize
+
 LOG = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
@@ -44,7 +48,7 @@ def parse_args():
     p.add_argument("--output_dir", type=str, default="./distilled-unsloth")
     p.add_argument("--epochs", type=int, default=2)
     p.add_argument("--batch_size", type=int, default=8, help="Batch size (default: 8, tuned for M3 Max)")
-    p.add_argument("--lora_r", type=int, default=64)
+    p.add_argument("--lora_r", type=int, default=16)
     p.add_argument("--kd_temp", type=float, default=1.0, help="KD temperature")
     p.add_argument("--max_samples", type=int, default=2000)
     p.add_argument("--eval_steps", type=int, default=50)
@@ -54,6 +58,12 @@ def parse_args():
     p.add_argument("--offline", action="store_true", help="Air-gapped: local cache only")
     p.add_argument("--watchdog", action="store_true", help="Enable pause.flag monitoring")
     p.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
+    p.add_argument("--topk_logits", type=int, default=50,
+                   help="Top-K teacher logits for distillation (default: 50). ~300 MB vs 311 GB full vocab.")
+    p.add_argument("--grad_acc", type=int, default=4,
+                   help="Gradient accumulation steps (default: 4, effective batch = batch_size × grad_acc)")
+    p.add_argument("--ce_alpha", type=float, default=0.1,
+                   help="CE loss weight mixed with KD loss (default: 0.1). 0=pure KD, 1=pure CE.")
     return p.parse_args()
 
 
@@ -78,50 +88,11 @@ def _check_imports():
     return unsloth_ok, mlx_ok
 
 
-def _load_dataset_texts(args):
-    """Load dataset and return list of formatted text strings."""
-    if args.offline or os.environ.get("HF_DATASETS_OFFLINE") == "1":
-        cache_candidates = [
-            Path("datasets_cache") / args.dataset.replace("/", "___"),
-            Path("scripts/datasets_cache") / args.dataset.replace("/", "___"),
-        ]
-        for c in cache_candidates:
-            if c.exists():
-                from datasets import load_from_disk
-                LOG.info("Loading dataset from disk: %s", c)
-                ds = load_from_disk(str(c))
-                split = ds["train"] if "train" in ds else ds
-                break
-        else:
-            raise FileNotFoundError(
-                "Offline mode: dataset not found in cache. Run scripts/cache_datasets.py first."
-            )
-    else:
-        from datasets import load_dataset
-        LOG.info("Downloading dataset: %s", args.dataset)
-        ds = load_dataset(args.dataset)
-        split = ds["train"]
-
-    if args.max_samples and len(split) > args.max_samples:
-        split = split.select(range(args.max_samples))
-
-    texts = []
-    for ex in split:
-        prompt = ex.get("instruction", ex.get("prompt", ""))
-        if ex.get("input"):
-            prompt += "\n\nInput: " + ex["input"]
-        output = ex.get("output", ex.get("response", ""))
-        texts.append(prompt + "\n\n### Response:\n" + output)
-
-    LOG.info("Loaded %d samples.", len(texts))
-    return texts
-
-
 class UnslothKDTrainer:
     """
     Minimal KD trainer wrapping Unsloth student + MLX teacher.
-    Implements its own training loop (not SFTTrainer subclass) to avoid
-    trl version incompatibilities while keeping the same metrics.jsonl output.
+    Implements its own training loop to avoid trl version incompatibilities
+    while keeping the same metrics.jsonl output as other backends.
     """
 
     def __init__(self, student_model, student_tokenizer, teacher_model,
@@ -140,7 +111,8 @@ class UnslothKDTrainer:
         if not flag.exists():
             return False
         try:
-            info = json.load(open(flag))
+            with open(flag) as f:
+                info = json.load(f)
             reason = info.get("reason", "unknown")
         except (json.JSONDecodeError, OSError):
             reason = "pause.flag"
@@ -152,129 +124,168 @@ class UnslothKDTrainer:
         with open(self.metrics_path, "a") as f:
             f.write(json.dumps(row) + "\n")
 
-    def _get_teacher_logits(self, input_ids_np):
-        """Get teacher logits via MLX (frozen, no-grad)."""
+    def _precompute_teacher_topk(self, all_input_ids_np, K):
+        """Pre-compute teacher top-K logits for all samples once.
+
+        Teacher is frozen and dataset is fixed — no need to repeat this.
+        Returns numpy float16 values + int32 indices: ~300 MB for K=50.
+        """
         import mlx.core as mx
-        import mlx.nn as nn
-        mx_ids = mx.array(input_ids_np)
-        out = self.teacher(mx_ids)
-        logits = out if isinstance(out, mx.array) else out.logits
-        return logits  # MLX array
+
+        n_samples, seq_len = all_input_ids_np.shape
+        topk_values = np.zeros((n_samples, seq_len, K), dtype=np.float16)
+        topk_indices = np.zeros((n_samples, seq_len, K), dtype=np.int32)
+
+        LOG.info("Pre-computing teacher top-%d logits for %d samples...", K, n_samples)
+        for start in range(0, n_samples, self.args.batch_size):
+            end = min(start + self.args.batch_size, n_samples)
+            mx_ids = mx.array(all_input_ids_np[start:end])
+            out = self.teacher(mx_ids)
+            t_logits = out if isinstance(out, mx.array) else out.logits
+            mx.eval(t_logits)
+            topk_idx = mx.argsort(-t_logits, axis=-1)[..., :K]
+            topk_val = mx.take_along_axis(t_logits, topk_idx, axis=-1)
+            mx.eval(topk_idx, topk_val)
+            topk_values[start:end] = np.array(topk_val.astype(mx.float32)).astype(np.float16)
+            topk_indices[start:end] = np.array(topk_idx.astype(mx.int32))
+            if end % max(self.args.batch_size * 10, 1) == 0 or end == n_samples:
+                LOG.info("  Teacher logits: %d/%d samples", end, n_samples)
+
+        mb = (topk_values.nbytes + topk_indices.nbytes) / 1e6
+        LOG.info("Teacher top-%d logits cached (%.0f MB).", K, mb)
+        return topk_values, topk_indices
 
     def train(self):
+        import random
+        import time
         import torch
         import torch.nn.functional as F
 
         args = self.args
         tokenizer = self.student_tok
         model = self.student
+        K = args.topk_logits
+        grad_acc = args.grad_acc
+        ce_alpha = args.ce_alpha
+
+        # ── Pre-tokenize dataset once ────────────────────────────────────────────
+        LOG.info("Pre-tokenizing %d samples...", len(self.texts))
+        all_input_ids_np, all_attention_mask_np = pretokenize(tokenizer, self.texts)
+        n_samples = len(self.texts)
+        LOG.info("Pre-tokenization complete.")
+
+        # ── Pre-compute teacher top-K logits ─────────────────────────────────────
+        topk_values_np, topk_indices_np = self._precompute_teacher_topk(all_input_ids_np, K)
+
+        # ── Eval setup (pre-computed, no teacher forward at eval time) ────────────
+        eval_size = min(32, n_samples)
+        eval_ids  = torch.tensor(all_input_ids_np[:eval_size], dtype=torch.long)
+        eval_mask = torch.tensor(all_attention_mask_np[:eval_size], dtype=torch.long)
+        eval_topk_v = torch.tensor(topk_values_np[:eval_size].astype(np.float32))
+        eval_topk_i = torch.tensor(topk_indices_np[:eval_size].astype(np.int64))
+
+        # ── Optimizer: linear warmup + cosine decay ───────────────────────────────
+        macro_batch = args.batch_size * grad_acc
+        steps_per_epoch = max(1, n_samples // macro_batch)
+        total_steps = args.epochs * steps_per_epoch
+        warmup_steps = max(1, int(0.03 * total_steps))
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-
-        n = len(self.texts)
-        batch_size = args.batch_size
-        steps_per_epoch = max(1, n // batch_size)
-        total_steps = args.epochs * steps_per_epoch
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[
+                torch.optim.lr_scheduler.LinearLR(
+                    optimizer, start_factor=1e-4, end_factor=1.0, total_iters=warmup_steps),
+                torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=max(1, total_steps - warmup_steps)),
+            ],
+            milestones=[warmup_steps],
+        )
 
         LOG.info(
-            "Unsloth KD training: epochs=%d  steps/epoch=%d  total=%d",
+            "Unsloth KD training: epochs=%d  steps/epoch=%d  total=%d  "
+            "batch=%d  grad_acc=%d  effective_batch=%d  topk=%d",
             args.epochs, steps_per_epoch, total_steps,
+            args.batch_size, grad_acc, macro_batch, K,
         )
 
         global_step = 0
-        import random
-        import time
         t0 = time.time()
 
         for epoch in range(args.epochs):
-            idx = list(range(n))
+            idx = list(range(n_samples))
             random.shuffle(idx)
 
-            for batch_start in range(0, n, batch_size):
+            for step_start in range(0, n_samples - macro_batch + 1, macro_batch):
                 if args.watchdog and self._check_pause():
                     LOG.info("Saving model before pause exit.")
                     model.save_pretrained(str(self.output_dir))
                     tokenizer.save_pretrained(str(self.output_dir))
                     return
 
-                batch_texts = [self.texts[i] for i in idx[batch_start: batch_start + batch_size]]
-                enc = tokenizer(
-                    batch_texts,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=512,
-                )
-                input_ids = enc["input_ids"]
-                attention_mask = enc["attention_mask"]
-
-                # Student forward (PyTorch / Unsloth)
-                s_out = model(input_ids=input_ids, attention_mask=attention_mask)
-                s_logits = s_out.logits / args.kd_temp  # (B, T, V)
-
-                # Teacher forward (MLX)
-                t_logits_mx = self._get_teacher_logits(input_ids.numpy())
-                # Convert to torch
-                import numpy as np
-                t_logits_np = np.array(t_logits_mx)
-                t_logits = torch.tensor(t_logits_np, dtype=s_logits.dtype,
-                                        device=s_logits.device) / args.kd_temp
-
-                # Match vocab size (teacher may differ from student)
-                min_vocab = min(s_logits.shape[-1], t_logits.shape[-1])
-                s_logits = s_logits[..., :min_vocab]
-                t_logits = t_logits[..., :min_vocab]
-
-                # Forward KL loss: KL(t || s) = sum(t * (log t - log s))
-                t_probs = F.softmax(t_logits, dim=-1)
-                s_log_probs = F.log_softmax(s_logits, dim=-1)
-                kl = (t_probs * (torch.log(t_probs + 1e-9) - s_log_probs))
-
-                # Mask padding tokens
-                mask = attention_mask.unsqueeze(-1).float()
-                loss = (kl * mask).sum(dim=-1).mean()
-
                 optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                accum_loss = 0.0
 
+                for acc in range(grad_acc):
+                    mini_start = step_start + acc * args.batch_size
+                    mini_idx = idx[mini_start: mini_start + args.batch_size]
+
+                    input_ids      = torch.tensor(all_input_ids_np[mini_idx],      dtype=torch.long)
+                    attention_mask = torch.tensor(all_attention_mask_np[mini_idx], dtype=torch.long)
+                    t_topk_v       = torch.tensor(topk_values_np[mini_idx].astype(np.float32))
+                    t_topk_i       = torch.tensor(topk_indices_np[mini_idx].astype(np.int64))
+
+                    s_out    = model(input_ids=input_ids, attention_mask=attention_mask)
+                    s_logits = s_out.logits                                              # (B, T, V)
+
+                    # KD loss: forward KL over top-K teacher positions
+                    s_log_probs      = F.log_softmax(s_logits / args.kd_temp, dim=-1)   # (B, T, V)
+                    s_log_probs_topk = s_log_probs.gather(-1, t_topk_i)                 # (B, T, K)
+                    t_probs          = F.softmax(t_topk_v / args.kd_temp, dim=-1)       # (B, T, K)
+                    pad_mask         = attention_mask.unsqueeze(-1).float()
+                    kl  = (t_probs * (torch.log(t_probs + 1e-9) - s_log_probs_topk)) * pad_mask
+                    kd  = kl.sum(dim=-1).mean()
+
+                    # CE loss: next-token prediction (stabilises early training)
+                    if ce_alpha > 0.0:
+                        ce_mask = attention_mask[:, 1:].float()
+                        ce_nll  = F.cross_entropy(
+                            s_logits[:, :-1].reshape(-1, s_logits.size(-1)),
+                            input_ids[:, 1:].reshape(-1),
+                            reduction="none",
+                        ).reshape(input_ids[:, 1:].shape)
+                        ce   = (ce_nll * ce_mask).sum() / ce_mask.sum().clamp(min=1)
+                        loss = ce_alpha * ce + (1.0 - ce_alpha) * kd
+                    else:
+                        loss = kd
+
+                    (loss / grad_acc).backward()
+                    accum_loss += loss.item() / grad_acc
+
+                optimizer.step()
+                scheduler.step()
                 global_step += 1
-                epoch_frac = epoch + batch_start / n
+                epoch_frac = epoch + step_start / n_samples
 
                 if global_step % 10 == 0:
                     elapsed = time.time() - t0
-                    loss_val = loss.item()
                     LOG.info(
-                        "step=%d  epoch=%.2f  loss=%.4f  %.2f s",
-                        global_step, epoch_frac, loss_val, elapsed,
+                        "step=%d  epoch=%.2f  loss=%.4f  %.2f steps/s",
+                        global_step, epoch_frac, accum_loss,
+                        global_step / max(elapsed, 1e-6),
                     )
-                    self._write_metric(global_step, epoch_frac, loss=loss_val)
+                    self._write_metric(global_step, epoch_frac, loss=accum_loss)
 
                 if global_step % args.eval_steps == 0:
-                    # Quick eval on first 32 samples
                     with torch.no_grad():
-                        eval_texts = self.texts[:min(32, len(self.texts))]
-                        enc_eval = tokenizer(
-                            eval_texts, return_tensors="pt",
-                            padding=True, truncation=True, max_length=512,
-                        )
-                        e_out = model(
-                            input_ids=enc_eval["input_ids"],
-                            attention_mask=enc_eval["attention_mask"],
-                        )
-                        e_logits = e_out.logits / args.kd_temp
-                        t_mx = self._get_teacher_logits(enc_eval["input_ids"].numpy())
-                        t_np = np.array(t_mx)
-                        t_eval = torch.tensor(t_np, dtype=e_logits.dtype) / args.kd_temp
-                        mv = min(e_logits.shape[-1], t_eval.shape[-1])
-                        kl_eval = (
-                            F.softmax(t_eval[..., :mv], dim=-1)
-                            * (
-                                torch.log(F.softmax(t_eval[..., :mv], dim=-1) + 1e-9)
-                                - F.log_softmax(e_logits[..., :mv], dim=-1)
-                            )
-                        ).sum(-1).mean()
-                        eval_loss_val = kl_eval.item()
+                        e_out    = model(input_ids=eval_ids, attention_mask=eval_mask)
+                        e_logits = e_out.logits
+                        e_log_p  = F.log_softmax(e_logits / args.kd_temp, dim=-1)
+                        e_log_p_topk = e_log_p.gather(-1, eval_topk_i)
+                        et_probs     = F.softmax(eval_topk_v / args.kd_temp, dim=-1)
+                        emask        = eval_mask.unsqueeze(-1).float()
+                        kl_eval      = (et_probs * (torch.log(et_probs + 1e-9) - e_log_p_topk)) * emask
+                        eval_loss_val = kl_eval.sum(dim=-1).mean().item()
                     LOG.info("  eval_loss=%.4f", eval_loss_val)
                     self._write_metric(global_step, epoch_frac, eval_loss=eval_loss_val)
 
@@ -361,7 +372,11 @@ def main():
     LOG.info("Student loaded with Unsloth LoRA.")
 
     # Dataset
-    texts = _load_dataset_texts(args)
+    ds_cache = os.environ.get("HF_DATASETS_CACHE")
+    LOG.info("Loading dataset: %s", args.dataset)
+    train_split = load_dataset_split(args.dataset, args.max_samples, ds_cache, args.offline)
+    texts = [format_prompt_full(ex) for ex in train_split]
+    LOG.info("Loaded %d samples.", len(texts))
 
     # Train
     trainer = UnslothKDTrainer(

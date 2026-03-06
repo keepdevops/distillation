@@ -14,11 +14,14 @@ import json
 import logging
 import math
 import os
+import sys
 from pathlib import Path
 
 import torch
-from datasets import load_dataset, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+sys.path.insert(0, os.path.dirname(__file__))
+from data_pipeline import load_dataset_split, format_prompt_full
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -51,15 +54,6 @@ def parse_args():
     p.add_argument("--quant_dir", type=str, default=None,
                    help="Path to quantized HF-format model dir to compare against student")
     return p.parse_args()
-
-
-def format_example(example):
-    prompt = example.get("instruction", example.get("prompt", ""))
-    if "input" in example and example["input"]:
-        prompt += "\n\nInput: " + example["input"]
-    prompt += "\n\n### Response:"
-    response = example.get("output", example.get("response", ""))
-    return {"text": prompt + " " + response}
 
 
 def detect_step(checkpoint_dir):
@@ -210,16 +204,11 @@ def main():
     # Load dataset
     logger.info("Loading dataset %s", args.dataset)
     ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
-    if Path(args.dataset).exists():
-        data = load_from_disk(args.dataset)
-        dataset = data["train"] if isinstance(data, dict) and "train" in data else data
-    else:
-        dataset = load_dataset(args.dataset, split="train", cache_dir=ds_cache)
-
-    if args.max_samples and args.max_samples < len(dataset):
-        dataset = dataset.select(range(args.max_samples))
-
-    dataset = dataset.map(format_example, remove_columns=dataset.column_names)
+    dataset = load_dataset_split(args.dataset, args.max_samples, ds_cache, offline)
+    dataset = dataset.map(
+        lambda ex: {"text": format_prompt_full(ex)},
+        remove_columns=dataset.column_names,
+    )
     split = dataset.train_test_split(test_size=args.val_size, seed=42)
     val_ds = split["test"]
 
