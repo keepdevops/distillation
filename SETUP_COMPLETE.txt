@@ -1,0 +1,39 @@
+✅ MULTI-USER SHARED MODEL STORAGE - SETUP COMPLETE
+====================================================
+
+Location: /Users/Shared/models
+
+What was set up:
+  ✓ Shared directory created at /Users/Shared/models
+  ✓ distilled-minillm copied to shared location
+  ✓ hf_cache (3.3 GB) copied to shared location
+  ✓ MODEL_PATH=/Users/Shared/models added to ~/.zshrc
+  ✓ Universal Gradio UI updated to use MODEL_PATH
+  ✓ Model path helper scripts created
+  ✓ Setup script for other users created
+
+Current user (caribou) is ready to go!
+
+For other users on this Mac:
+  cd /Users/caribou/distill
+  ./scripts/setup_shared_models.sh
+
+Quick Test:
+  export MODEL_PATH=/Users/Shared/models
+  python scripts/eval_gradio.py
+  
+  # Or with MLX:
+  mlx_lm.generate \
+    --model-dir $MODEL_PATH/hf_cache/models--Qwen--*/snapshots/* \
+    --prompt "Hello"
+
+Documentation:
+  - MULTI_USER_SETUP.md - Complete multi-user guide
+  - docs/UNIVERSAL_GRADIO.md - Universal UI documentation
+  - /Users/Shared/models/README.txt - Quick reference
+
+All user profiles can now:
+  ✓ Access models at /Users/Shared/models
+  ✓ Run mlx_lm.generate with --model-dir $MODEL_PATH/...
+  ✓ Use Gradio UI (auto-detects MODEL_PATH)
+  ✓ Train and share models across profiles

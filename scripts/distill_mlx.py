@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from data_pipeline import load_dataset_split, format_prompt_full, pretokenize
+from data_pipeline import load_dataset_split, format_prompt_full, pretokenize, validate_dataset_schema, DATASET_HELP
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(
@@ -47,10 +47,10 @@ def parse_args():
     p.add_argument("--teacher", type=str, default="meta-llama/Llama-3.2-8B-Instruct")
     p.add_argument("--student", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
     p.add_argument("--open", action="store_true", help="Use open Qwen2 models (no HF login)")
-    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca")
+    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca", help=DATASET_HELP)
     p.add_argument("--output_dir", type=str, default="./distilled-mlx")
     p.add_argument("--epochs", type=int, default=2)
-    p.add_argument("--batch_size", type=int, default=8, help="Batch size (default: 8, tuned for M3 Max)")
+    p.add_argument("--batch_size", type=int, default=2, help="Batch size (default: 2; student full-vocab logits are ~0.6 GB/sample at seq_len=512)")
     p.add_argument("--lora_r", type=int, default=8)
     p.add_argument("--kd_temp", type=float, default=1.0, help="KD temperature")
     p.add_argument("--max_samples", type=int, default=2000)
@@ -182,36 +182,25 @@ def main():
     # Initialise trainer_state.json so training_watchdog.py can monitor this run
     _write_trainer_state(trainer_state_path, [])
 
-    # ── Load models ─────────────────────────────────────────────────────────────
+    # ── Load teacher only first (student loaded after teacher is freed) ──────────
     LOG.info("Loading teacher: %s", args.teacher)
     teacher_model, teacher_tokenizer = mlx_load(args.teacher)
     teacher_model.freeze()
     LOG.info("Teacher loaded and frozen.")
-
-    LOG.info("Loading student: %s", args.student)
-    student_model, student_tokenizer = mlx_load(args.student)
-
-    # Apply LoRA to student via mlx_lm helper (operates on last N transformer blocks)
-    LOG.info("Applying LoRA (r=%d) to student...", args.lora_r)
-    lora_config = {"rank": args.lora_r, "scale": 20.0, "dropout": 0.0}
-    # Apply to all transformer blocks (num_layers=-1 means all)
-    num_blocks = len(list(student_model.model.layers)) if hasattr(student_model, "model") else 24
-    linear_to_lora_layers(student_model, num_blocks, lora_config)
-    student_model.train()
-    trainable = [(k, v) for k, v in student_model.trainable_parameters().items()]
-    LOG.info("LoRA applied: %d trainable parameter tensors.", len(trainable))
 
     # ── Dataset ─────────────────────────────────────────────────────────────────
     ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
     LOG.info("Loading dataset: %s", args.dataset)
     train_split = load_dataset_split(args.dataset, args.max_samples, ds_cache, args.offline)
     LOG.info("Train samples: %d", len(train_split))
+    validate_dataset_schema(train_split, args.dataset, logger=LOG)
 
     texts = [format_prompt_full(ex) for ex in train_split]
 
     # ── Pre-tokenize entire dataset once ────────────────────────────────────────
+    # Uses teacher tokenizer (same vocab as student for same model family).
     LOG.info("Pre-tokenizing %d samples...", len(texts))
-    all_input_ids, all_attention_mask = pretokenize(student_tokenizer, texts)
+    all_input_ids, all_attention_mask = pretokenize(teacher_tokenizer, texts)
     n_samples = len(texts)
     seq_len = all_input_ids.shape[1]
     LOG.info("Pre-tokenization complete.")
@@ -235,6 +224,7 @@ def main():
         mx.eval(topk_idx, topk_val)
         all_teacher_topk_values[precomp_start:precomp_end] = np.array(topk_val.astype(mx.float32)).astype(np.float16)
         all_teacher_topk_indices[precomp_start:precomp_end] = np.array(topk_idx.astype(mx.int32))
+        mx.clear_cache()  # free MLX intermediate buffers (logits, sort indices) after each batch
         if precomp_end % max(args.batch_size * 10, 1) == 0 or precomp_end == n_samples:
             LOG.info("  Teacher logits: %d/%d samples", precomp_end, n_samples)
 
@@ -244,6 +234,20 @@ def main():
     # Free teacher from memory — logits are fully cached, teacher not needed during training
     del teacher_model
     mx.clear_cache()
+
+    # ── Load student AFTER teacher is freed (avoids both models in memory at once) ──
+    LOG.info("Loading student: %s", args.student)
+    student_model, student_tokenizer = mlx_load(args.student)
+
+    # Apply LoRA to student via mlx_lm helper (operates on last N transformer blocks)
+    LOG.info("Applying LoRA (r=%d) to student...", args.lora_r)
+    lora_config = {"rank": args.lora_r, "scale": 20.0, "dropout": 0.0}
+    # Apply to all transformer blocks (num_layers=-1 means all)
+    num_blocks = len(list(student_model.model.layers)) if hasattr(student_model, "model") else 24
+    linear_to_lora_layers(student_model, num_blocks, lora_config)
+    student_model.train()
+    trainable = [(k, v) for k, v in student_model.trainable_parameters().items()]
+    LOG.info("LoRA applied: %d trainable parameter tensors.", len(trainable))
 
     # Eval setup — first 32 samples, using pre-computed top-K (no teacher forward at eval time)
     eval_size = min(32, n_samples)
@@ -367,10 +371,12 @@ def main():
                 accum_loss += float(loss_val) / grad_acc
                 accum_grads = grads if accum_grads is None else _add_grads(accum_grads, grads)
                 mx.eval(accum_grads)
+                mx.clear_cache()  # free intermediate activations (s_logits, log_probs) after each micro-batch
 
             accum_grads = _scale_grads(accum_grads, 1.0 / grad_acc)
             optimizer.update(student_model, accum_grads)
             mx.eval(student_model.parameters(), optimizer.state)
+            mx.clear_cache()  # free optimizer intermediates after each optimizer step
 
             global_step += 1
             epoch_frac = epoch + step_start / n_samples
@@ -387,11 +393,20 @@ def main():
                 _write_trainer_state(trainer_state_path, log_history)
 
             if global_step % args.eval_steps == 0:
-                eval_loss, _ = loss_and_grad(
-                    student_model, eval_ids, eval_mask, eval_topk_values, eval_topk_indices
-                )
-                mx.eval(eval_loss)
-                eval_loss_val = float(eval_loss)
+                # Eval without gradient computation — avoids ~20 GB activation buffers
+                # that loss_and_grad would allocate for eval_size=32 samples.
+                # Run in micro-batches of batch_size to keep per-step peak memory small.
+                eval_losses = []
+                for _eb in range(0, eval_size, batch_size):
+                    _eids = eval_ids[_eb: _eb + batch_size]
+                    _emsk = eval_mask[_eb: _eb + batch_size]
+                    _etv  = eval_topk_values[_eb: _eb + batch_size]
+                    _eti  = eval_topk_indices[_eb: _eb + batch_size]
+                    _el = kd_loss(student_model, _eids, _emsk, _etv, _eti)
+                    mx.eval(_el)
+                    eval_losses.append(float(_el))
+                    mx.clear_cache()
+                eval_loss_val = sum(eval_losses) / len(eval_losses)
                 LOG.info("  eval_loss=%.4f", eval_loss_val)
                 _write_metric(metrics_path, global_step, epoch_frac, eval_loss=eval_loss_val)
                 log_history.append({"step": global_step, "epoch": epoch_frac, "eval_loss": eval_loss_val})

@@ -52,26 +52,166 @@ def run_cmd(cmd: list[str], cwd: Path, env: dict | None = None) -> None:
 
 
 def find_llama_cpp(project_root: Path) -> Path | None:
-    for candidate in [project_root / "llama.cpp", project_root.parent / "llama.cpp"]:
+    candidates = [
+        Path("/Users/Shared/models/llama.cpp"),
+        project_root / "llama.cpp",
+        project_root.parent / "llama.cpp",
+    ]
+    for candidate in candidates:
         if (candidate / "convert_hf_to_gguf.py").exists():
             return candidate
     return None
 
 
+def _copy_hf_config_files(model_id: str, dest_dir: Path) -> None:
+    """Copy config.json and tokenizer files from HF cache to dest_dir."""
+    import shutil
+    hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+    cache_name = "models--" + model_id.replace("/", "--")
+    snapshots_dir = Path(hf_home) / "hub" / cache_name / "snapshots"
+    config_src_dir = None
+    if snapshots_dir.exists():
+        for snap in sorted(snapshots_dir.iterdir()):
+            if (snap / "config.json").exists():
+                config_src_dir = snap
+                break
+    if config_src_dir is None:
+        raise RuntimeError(
+            f"Could not find cached HF config for {model_id}. "
+            "Run with network access first to download the model."
+        )
+    for fname in [
+        "config.json", "generation_config.json",
+        "tokenizer.json", "tokenizer_config.json",
+        "special_tokens_map.json", "vocab.json", "merges.txt",
+    ]:
+        src = config_src_dir / fname
+        if src.exists():
+            shutil.copy2(src, dest_dir / fname)
+    LOG.info("Copied HF config files from %s", config_src_dir)
+
+
+def _mlx_weights_to_hf_dir(output_dir: Path) -> Path:
+    """Convert MLX .npz weights (with LoRA) into a HF-compatible directory.
+
+    Merges LoRA adapters into the base weights, then saves as safetensors.
+    The resulting directory can be passed to convert_hf_to_gguf.py.
+
+    LoRA naming convention from mlx_lm LoRALinear:
+      base weight : <layer>.linear.weight
+      LoRA A      : <layer>.lora_a.weight  shape (r, in_features)
+      LoRA B      : <layer>.lora_b.weight  shape (out_features, r)
+      merge       : W + scale * (B @ A)
+    where scale = alpha / r = 20.0 / lora_r  (standard LoRA, mlx_lm convention).
+    """
+    import numpy as np
+
+    with open(output_dir / "distill_config.json") as f:
+        dcfg = json.load(f)
+    student_id = dcfg["student"]
+    lora_r = int(dcfg.get("lora_r", 16))
+    lora_scale = 20.0 / lora_r  # alpha=20 (hardcoded in distill_mlx.py), scale = alpha/r
+
+    npz_path = output_dir / "mlx_student_weights.npz"
+    LOG.info("Loading MLX weights from %s", npz_path)
+    try:
+        import mlx.core as mx
+        raw = mx.load(str(npz_path))
+        weights = {k: np.array(v.astype(mx.float32)) for k, v in raw.items()}
+    except Exception:
+        weights = {k: v.astype(np.float32) for k, v in np.load(str(npz_path)).items()}
+
+    all_keys = set(weights)
+    hf_weights: dict[str, np.ndarray] = {}
+    processed: set[str] = set()
+
+    for key in sorted(all_keys):
+        if key in processed:
+            continue
+
+        # Skip raw LoRA parameter tensors (handled during base weight merge below).
+        # mlx_lm stores them as <layer>.lora_a and <layer>.lora_b (raw mx.array,
+        # NOT as nn.Linear sub-modules, so no trailing .weight suffix).
+        if key.endswith(".lora_a") or key.endswith(".lora_b"):
+            processed.add(key)
+            continue
+
+        if key.endswith(".linear.weight"):
+            # LoRA-wrapped linear — merge adapters into base weight.
+            # mlx_lm LoRALinear stores:
+            #   linear.weight : (out, in)
+            #   lora_a        : (in, r)   — already transposed for x @ lora_a @ lora_b
+            #   lora_b        : (r, out)
+            # Merged: W + scale * lora_b.T @ lora_a.T  →  (out, in)
+            prefix = key[: -len(".linear.weight")]
+            a_key = f"{prefix}.lora_a"
+            b_key = f"{prefix}.lora_b"
+            hf_key = f"{prefix}.weight"
+            W = weights[key]
+            if a_key in all_keys and b_key in all_keys:
+                A = weights[a_key]  # (in, r)
+                B = weights[b_key]  # (r, out)
+                hf_weights[hf_key] = W + lora_scale * (B.T @ A.T)
+                processed.update({key, a_key, b_key})
+            else:
+                hf_weights[hf_key] = W
+                processed.add(key)
+        elif key.endswith(".linear.bias"):
+            prefix = key[: -len(".linear.bias")]
+            hf_weights[f"{prefix}.bias"] = weights[key]
+            processed.add(key)
+        else:
+            hf_weights[key] = weights[key]
+            processed.add(key)
+
+    hf_dir = output_dir / "_hf_export"
+    hf_dir.mkdir(exist_ok=True)
+
+    try:
+        from safetensors.numpy import save_file
+        save_file(
+            {k: v.astype(np.float16) for k, v in hf_weights.items()},
+            str(hf_dir / "model.safetensors"),
+        )
+    except ImportError:
+        import torch
+        torch.save(
+            {k: torch.tensor(v) for k, v in hf_weights.items()},
+            str(hf_dir / "pytorch_model.bin"),
+        )
+
+    _copy_hf_config_files(student_id, hf_dir)
+    LOG.info("MLX→HF conversion complete: %s (%d tensors)", hf_dir, len(hf_weights))
+    return hf_dir
+
+
 def export_gguf(output_dir: Path, project_root: Path, outtype: str) -> None:
-    """Export trained model to GGUF using llama.cpp."""
+    """Export trained model to GGUF using llama.cpp.
+
+    If output_dir contains MLX weights (.npz) instead of a HF model, the
+    LoRA adapters are merged and a temporary HF-compatible directory is
+    created first, then passed to convert_hf_to_gguf.py.
+    """
     llama_cpp = find_llama_cpp(project_root)
     if not llama_cpp:
         LOG.warning("llama.cpp not found; skipping GGUF export")
         return
+
+    convert_dir = output_dir
+    if not (output_dir / "config.json").exists() and (output_dir / "mlx_student_weights.npz").exists():
+        LOG.info("MLX output detected — converting to HF format before GGUF export...")
+        convert_dir = _mlx_weights_to_hf_dir(output_dir)
+
     convert_script = llama_cpp / "convert_hf_to_gguf.py"
     out_name = output_dir.name + f"-{outtype}.gguf"
-    out_file = output_dir / out_name
+    # Save GGUF alongside other models in /Users/Shared/models
+    gguf_dir = Path("/Users/Shared/models")
+    out_file = gguf_dir / out_name
     run_cmd(
         [
             sys.executable,
             str(convert_script),
-            str(output_dir),
+            str(convert_dir),
             "--outfile",
             str(out_file),
             "--outtype",
@@ -143,8 +283,9 @@ def _build_distill_cmd(args, output_dir: Path,
             cmd.append("--watchdog")
         if sft_checkpoint:
             cmd += ["--student", sft_checkpoint]
-        if dataset_override:
-            cmd += ["--dataset", dataset_override]
+        _ds = dataset_override or getattr(args, "dataset", None)
+        if _ds:
+            cmd += ["--dataset", _ds]
 
     elif args.backend == "mlx":
         cmd = [
@@ -157,6 +298,9 @@ def _build_distill_cmd(args, output_dir: Path,
             "--q_bits", str(args.q_bits),
             "--seed", str(trial_seed),
         ]
+        _ds = dataset_override or getattr(args, "dataset", None)
+        if _ds:
+            cmd += ["--dataset", _ds]
         if args.open:
             cmd.append("--open")
         if args.offline:
@@ -177,6 +321,9 @@ def _build_distill_cmd(args, output_dir: Path,
             "--q_bits", str(args.q_bits),
             "--seed", str(trial_seed),
         ]
+        _ds = dataset_override or getattr(args, "dataset", None)
+        if _ds:
+            cmd += ["--dataset", _ds]
         if args.open:
             cmd.append("--open")
         if args.offline:
@@ -218,11 +365,32 @@ def main():
     ap.add_argument("--coreml_quantize", type=str, default=None,
                     choices=["int4", "int8", "float16"],
                     help="CoreML post-training quantization type")
+    ap.add_argument("--dataset", type=str, default="tatsu-lab/alpaca",
+                    help="HF dataset ID or local path (default: tatsu-lab/alpaca). "
+                         "Better options: HuggingFaceH4/no_robots, teknium/OpenHermes-2.5, "
+                         "allenai/tulu-3-sft-mixture, Open-Orca/OpenOrca")
+    # ── Dataset filtering ─────────────────────────────────────────────────────
+    ap.add_argument("--filter", action="store_true",
+                    help="Pre-filter dataset with filter_dataset.py before distillation")
+    ap.add_argument("--filter_target", type=int, default=10000,
+                    help="Keep top-N samples after filtering (default: 10000)")
+    ap.add_argument("--filter_min_response_words", type=int, default=30,
+                    help="Min response word count for filter (default: 30)")
+    ap.add_argument("--filter_min_distinct2", type=float, default=0.40,
+                    help="Min distinct-2 score for filter (default: 0.40)")
+    ap.add_argument("--filter_jaccard", type=float, default=0.55,
+                    help="Jaccard similarity threshold for near-dedup (default: 0.55)")
+    ap.add_argument("--filter_minhash", action="store_true",
+                    help="Use MinHash LSH for global dedup in filter (requires datasketch)")
+    ap.add_argument("--filter_teacher_score", action="store_true",
+                    help="Re-rank filtered candidates by teacher log-probability")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--max_samples", type=int, default=2000)
     ap.add_argument("--temperature", type=float, default=1.0,
                     help="KD temperature (default 1.0)")
-    ap.add_argument("--lora_r", type=int, default=64)
+    ap.add_argument("--lora_r", type=int, default=16,
+                    help="LoRA rank (default: 16). Higher ranks increase memory; "
+                         "64 risks OOM on MLX with full-vocab logit tensors.")
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--skip_eval", action="store_true",
                     help="Skip post-distillation eval steps (run_eval + eval_quality)")
@@ -356,15 +524,68 @@ def main():
         student_id = "Qwen/Qwen2-0.5B-Instruct" if args.open else "meta-llama/Llama-3.2-1B-Instruct"
         est = _estimate_gb(teacher_id, cache_dir) + _estimate_gb(student_id, cache_dir)
         if est > 0:
-            LOG.info("Estimated memory: ~%.1f GB (teacher + student training)", est)
-            if est > 30:
-                LOG.warning(
-                    "Memory estimate (%.1f GB) may approach 36GB M3 Max limit. "
-                    "Consider --batch_size 2 or --grad_acc 32 if OOM.", est,
+            if args.backend == "mlx":
+                # MLX frees teacher after logit precompute; peak memory is student
+                # + optimizer state + logit tensors (batch × seq_len × vocab_size × 4B).
+                # At batch=2, seq=512, vocab=152k: ~0.6 GB per forward pass.
+                LOG.info(
+                    "Estimated memory (MLX): ~%.1f GB student+optimizer "
+                    "(teacher freed after precompute)", _estimate_gb(student_id, cache_dir)
                 )
+                vocab_gb = args.batch_size * 512 * 152000 * 4 / 1e9
+                LOG.info(
+                    "Peak logit tensor per micro-batch: ~%.2f GB "
+                    "(batch_size=%d × seq_len=512 × vocab=152k × float32)",
+                    vocab_gb, args.batch_size,
+                )
+                if vocab_gb > 2.0:
+                    LOG.warning(
+                        "Logit tensor %.2f GB > 2 GB — likely OOM cause. "
+                        "Reduce --batch_size (currently %d) to 1 or 2.",
+                        vocab_gb, args.batch_size,
+                    )
+            else:
+                LOG.info("Estimated memory: ~%.1f GB (teacher + student training)", est)
+                if est > 30:
+                    LOG.warning(
+                        "Memory estimate (%.1f GB) may approach 36GB M3 Max limit. "
+                        "Consider --batch_size 2 or --grad_acc 32 if OOM.", est,
+                    )
 
-    # ── Step 0b: Synthetic data generation ───────────────────────────────────────
+    # ── Step 0b: Dataset filtering ────────────────────────────────────────────────
     _dataset_override: str | None = None
+    if args.filter:
+        _filter_out = output_dir / "filtered_data"
+        LOG.info(
+            "Pre-filtering dataset '%s' → top-%d samples ...",
+            args.dataset, args.filter_target,
+        )
+        filter_cmd = [
+            sys.executable, "scripts/filter_dataset.py",
+            "--dataset", args.dataset,
+            "--output_dir", str(_filter_out),
+            "--target", str(args.filter_target),
+            "--min_response_words", str(args.filter_min_response_words),
+            "--min_distinct2", str(args.filter_min_distinct2),
+            "--jaccard_threshold", str(args.filter_jaccard),
+        ]
+        if args.filter_minhash:
+            filter_cmd.append("--minhash")
+        if args.filter_teacher_score:
+            filter_cmd += ["--teacher_score"]
+            if args.open:
+                filter_cmd += ["--teacher", "Qwen/Qwen2-1.5B-Instruct"]
+        if args.offline:
+            filter_cmd.append("--offline")
+        try:
+            run_cmd(filter_cmd, project_root)
+            _dataset_override = str(_filter_out)
+            _steps_completed.append("filter")
+            LOG.info("Filtered dataset ready: %s", _dataset_override)
+        except RuntimeError as e:
+            LOG.warning("Dataset filtering failed (non-fatal, using raw dataset): %s", e)
+
+    # ── Step 0c: Synthetic data generation ───────────────────────────────────────
     if args.synthetic_data:
         LOG.info("Generating %d synthetic pairs...", args.n_synthetic)
         synth_cmd = [
@@ -558,7 +779,8 @@ def main():
     # ── 4. Quality eval (diversity + LLM-as-judge) ───────────────────────────────
     # NOTE: Quality eval only runs on winner (output_dir points to best trial after line 490)
     # This saves 5-10 min per non-winning trial (~20-40 min for 5-trial runs)
-    if not args.skip_eval and not args.skip_judge:
+    # MLX saves weights as .npz (not HF format) — eval_quality cannot load them
+    if not args.skip_eval and not args.skip_judge and args.backend != "mlx":
         LOG.info("Running quality eval (diversity + judge) on winning model...")
         quality_cmd = [sys.executable, "scripts/eval_quality.py", str(output_dir)]
         if args.open:
@@ -620,7 +842,7 @@ def main():
                 "backend": args.backend,
                 "teacher": teacher_id,
                 "student": student_id,
-                "dataset": str(_dataset_override or "tatsu-lab/alpaca"),
+                "dataset": str(_dataset_override or args.dataset),
                 "epochs": args.epochs,
                 "max_samples": args.max_samples,
                 "temperature": args.temperature,

@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 import torch
 from peft import LoraConfig, get_peft_model
 
-from data_pipeline import load_dataset_split, format_prompt_only
+from data_pipeline import load_dataset_split, format_prompt_only, validate_dataset_schema, DATASET_HELP
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -45,7 +45,7 @@ def parse_args():
     p.add_argument("--student", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
     p.add_argument("--open", action="store_true",
                    help="Use open models (Qwen2 1.5B→0.5B) — no HF login or Meta license")
-    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca")
+    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca", help=DATASET_HELP)
     p.add_argument("--output_dir", type=str, default="./distilled-minillm")
     p.add_argument("--epochs", type=int, default=2)
     p.add_argument("--batch_size", type=int, default=8, help="Physical batch size (default: 8, optimized for M3 Max)")
@@ -183,6 +183,7 @@ def main():
     # Dataset
     ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
     dataset = load_dataset_split(args.dataset, args.max_samples, ds_cache, offline)
+    validate_dataset_schema(dataset, args.dataset, logger=LOG)
     dataset = dataset.map(
         lambda ex: {"prompt": format_prompt_only(ex)},
         remove_columns=dataset.column_names,

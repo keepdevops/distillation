@@ -1,1 +1,4 @@
 {"timestamp": 1772599200.3419368, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1772664244.522154, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1772830890.714614, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1772875034.846526, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}

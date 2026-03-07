@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from data_pipeline import load_dataset_split, format_prompt_full, pretokenize
+from data_pipeline import load_dataset_split, format_prompt_full, pretokenize, validate_dataset_schema, DATASET_HELP
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(
@@ -44,7 +44,7 @@ def parse_args():
     p.add_argument("--teacher", type=str, default="meta-llama/Llama-3.2-8B-Instruct")
     p.add_argument("--student", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
     p.add_argument("--open", action="store_true", help="Use open Qwen2 models (no HF login)")
-    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca")
+    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca", help=DATASET_HELP)
     p.add_argument("--output_dir", type=str, default="./distilled-unsloth")
     p.add_argument("--epochs", type=int, default=2)
     p.add_argument("--batch_size", type=int, default=8, help="Batch size (default: 8, tuned for M3 Max)")
@@ -375,6 +375,7 @@ def main():
     ds_cache = os.environ.get("HF_DATASETS_CACHE")
     LOG.info("Loading dataset: %s", args.dataset)
     train_split = load_dataset_split(args.dataset, args.max_samples, ds_cache, args.offline)
+    validate_dataset_schema(train_split, args.dataset, logger=LOG)
     texts = [format_prompt_full(ex) for ex in train_split]
     LOG.info("Loaded %d samples.", len(texts))
 
