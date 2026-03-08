@@ -206,7 +206,7 @@ def main():
         description="Training watchdog: ML-specific progress monitoring (plateau detection). "
                     "For thermal control, use thermal_agent.py instead."
     )
-    p.add_argument("output_dir", type=str, help="Training output dir (trainer_state.json)")
+    p.add_argument("output_dir", type=str, nargs="?", default="./distilled-minillm", help="Training output dir (trainer_state.json)")
     p.add_argument("--interval", type=int, default=60, help="Poll interval seconds")
     p.add_argument("--config", type=str, default=None, help="JSON rules file")
     p.add_argument("--once", action="store_true", help="Run one tick and exit")

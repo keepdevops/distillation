@@ -5,10 +5,11 @@
     "min_points": 5,
     "lr_scale": 0.8
   },
-  "thermal": {
-    "enabled": true,
-    "pause_if_over": 97,
-    "metric": "soc_temp_c"
+  "divergence": {
+    "window": 3,
+    "threshold": 1.5,
+    "baseline_window": 5,
+    "min_points": 8
   },
   "validator": {
     "backup_before_write": true,

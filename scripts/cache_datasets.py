@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_DATASETS = [
     ("tatsu-lab/alpaca", None),
     ("glue", "sst2"),
+    ("teknium/OpenHermes-2.5", None),
+    ("HuggingFaceH4/no_robots", None),
+    ("argilla/distilabel-capybara-dpo-7k-binarized", None),
+    ("mlabonne/guanaco-llama2-1k", None),
+    ("bigcode/self-oss-instruct-sc2-exec-filter-50k", None),
 ]
 
 
@@ -55,7 +60,8 @@ def main():
             else:
                 logger.info("  Loaded: %s", list(ds.keys()))
             if args.disk:
-                disk_name = (name.replace("/", "_") + (f"_{config}" if config else ""))
+                # Use "___" separator to match load_dataset_split offline lookup
+                disk_name = (name.replace("/", "___") + (f"_{config}" if config else ""))
                 disk_path = os.path.join(args.output, disk_name)
                 ds.save_to_disk(disk_path)
                 logger.info("  Saved to disk: %s (use --dataset %s)", disk_path, disk_path)

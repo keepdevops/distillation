@@ -53,7 +53,7 @@ def run_cmd(cmd: list[str], cwd: Path, env: dict | None = None) -> None:
 
 def find_llama_cpp(project_root: Path) -> Path | None:
     candidates = [
-        Path("/Users/Shared/models/llama.cpp"),
+        Path("/Users/Shared/llama"),
         project_root / "llama.cpp",
         project_root.parent / "llama.cpp",
     ]
@@ -204,8 +204,8 @@ def export_gguf(output_dir: Path, project_root: Path, outtype: str) -> None:
 
     convert_script = llama_cpp / "convert_hf_to_gguf.py"
     out_name = output_dir.name + f"-{outtype}.gguf"
-    # Save GGUF alongside other models in /Users/Shared/models
-    gguf_dir = Path("/Users/Shared/models")
+    # Save GGUF alongside other models in /Users/Shared/llama/models
+    gguf_dir = Path("/Users/Shared/llama/models")
     out_file = gguf_dir / out_name
     run_cmd(
         [
@@ -220,7 +220,7 @@ def export_gguf(output_dir: Path, project_root: Path, outtype: str) -> None:
         project_root,
     )
     LOG.info("GGUF saved: %s", out_file)
-    LOG.info("Serve with: cd %s && ./build/bin/llama-server -m %s", llama_cpp, out_file)
+    LOG.info("Serve with: /Users/Shared/llama/llama-server -m %s", out_file)
 
 
 def export_coreml(output_dir: Path, project_root: Path, quantize: str | None) -> None:

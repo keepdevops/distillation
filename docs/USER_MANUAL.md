@@ -570,9 +570,16 @@ See [THERMAL_AGENT.md](../THERMAL_AGENT.md) for complete documentation.
 
 ---
 
-## 12. Training Watchdog (Plateau Detection)
+## 12. Training Watchdog (Plateau & Divergence Detection)
 
-The **training watchdog** monitors `metrics.jsonl` and `trainer_state.json` during training. If loss plateaus, it writes `pause.flag` → the trainer saves and exits gracefully. This is separate from thermal protection and focuses on ML-specific monitoring.
+The **training watchdog** monitors `trainer_state.json` during training and writes `pause.flag` when it detects problems. The trainer then saves and exits gracefully. This is separate from thermal protection and focuses on ML-specific monitoring.
+
+**Two detection modes:**
+
+| Mode | Trigger | Action |
+|------|---------|--------|
+| **Plateau** | Loss changes < 0.001 for N consecutive steps | Writes `watchdog_suggestions.json` with scaled LR |
+| **Divergence** | Recent avg loss > early baseline avg × 1.5 | Writes `pause.flag` immediately to stop training |
 
 ### 12.1 Run watchdog in a separate terminal
 
@@ -741,13 +748,34 @@ See [air-gapped.md](air-gapped.md) for the full checklist.
 
 ### 15.2 `configs/watchdog_rules.json`
 
-| Key | Description |
-|-----|-------------|
-| `plateau.window` | Number of recent loss steps to check |
-| `plateau.max_delta` | Loss change below this → plateau |
-| `plateau.lr_scale` | Multiply LR by this on plateau |
+**Plateau detection:**
 
-**Note:** Thermal monitoring is now handled by the standalone `thermal_agent.py` (see section 11).
+| Key | Default | Description |
+|-----|---------|-------------|
+| `plateau.window` | `3` | Number of recent loss deltas to check |
+| `plateau.max_delta` | `0.001` | Loss change below this for all N steps → plateau |
+| `plateau.min_points` | `5` | Minimum loss points before checking |
+| `plateau.lr_scale` | `0.8` | Multiply LR suggestion by this on plateau |
+
+**Divergence detection (new):**
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `divergence.window` | `3` | Recent avg = mean of last N losses |
+| `divergence.threshold` | `1.5` | Pause if recent avg > baseline avg × this |
+| `divergence.baseline_window` | `5` | Baseline = mean of first N losses |
+| `divergence.min_points` | `8` | Minimum points before divergence check starts |
+
+Example config with both rules:
+
+```json
+{
+  "plateau": { "window": 3, "max_delta": 0.001, "min_points": 5, "lr_scale": 0.8 },
+  "divergence": { "window": 3, "threshold": 1.5, "baseline_window": 5, "min_points": 8 }
+}
+```
+
+**Note:** Thermal monitoring is handled by the standalone `thermal_agent.py` (see section 11).
 
 ---
 
@@ -804,7 +832,8 @@ See [air-gapped.md](air-gapped.md) for the full checklist.
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/eval_quality.py` | Quality gates and metrics |
+| `scripts/eval_quality.py` | Quality gates, diversity metrics, per-sample teacher PPL, LLM-as-judge |
+| `scripts/early_stopping_callback.py` | Stop training early if loss diverges from baseline (HF Trainer callback) |
 | `scripts/run_eval.py` | Validation loss evaluation |
 | `scripts/run_benchmarks.py` | Benchmark suite |
 | `scripts/experiment_log.py` | Experiment tracking |
@@ -813,10 +842,11 @@ See [air-gapped.md](air-gapped.md) for the full checklist.
 
 | Script | Purpose |
 |--------|---------|
+| `scripts/data_pipeline.py` | Shared dataset loading, prompt formatting, and tokenization utilities |
 | `scripts/cache_models.py` | Pre-download HF models for offline use |
 | `scripts/cache_datasets.py` | Pre-download datasets for offline use |
 | `scripts/setup_airgap.py` | Air-gap setup automation |
-| `scripts/generate_synthetic_data.py` | Synthetic dataset generation |
+| `scripts/generate_synthetic_data.py` | Synthetic instruction-response data generation (batched, dedup-filtered) |
 
 ### Service management
 
@@ -895,7 +925,8 @@ See [air-gapped.md](air-gapped.md) for the full checklist.
 |---------|-----|
 | `pause.flag` not detected | Trainer must be started with `--watchdog` flag |
 | Watchdog exits immediately | Check `trainer_state.json` exists (needs at least 1 training step) |
-| Thermal never triggers | Check `watchdog_rules.json` threshold and metric name |
+| Divergence not triggering | Needs `divergence.min_points` (default 8) losses logged before checking |
+| False divergence at start | First few losses may be high; increase `divergence.baseline_window` or `min_points` |
 
 ### General
 

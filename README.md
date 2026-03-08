@@ -1,4 +1,3 @@
- HEAD
 # Knowledge Distillation Toolkit
 
 **Compress large language models with high-quality transfer on Apple M3**
@@ -21,7 +20,8 @@ A bare-metal, **air-gapped** knowledge distillation pipeline for Apple M3 (ARM64
 - **Air-gapped** — full offline workflow with `conda-pack` and pre-cached models
 - **M3-optimized** — MPS/MLX backend, gradient checkpointing, LoRA, 4-bit teacher
 - **Three export formats** — GGUF (llama.cpp), CoreML (.mlpackage, Apple Neural Engine), MLX quantized weights
-- **UX** — CLI + Gradio (local-only), pipeline summary plots
+- **UX** — Universal Gradio UI (PyTorch/MLX/GGUF/vLLM), pipeline summary plots
+- **Multi-user** — Shared model storage at `/Users/Shared/models` for all profiles
 - **Thermal protection** — system-wide autonomous thermal agent monitors all jobs, auto-pause/resume
 - **Training watchdog** — plateau detection, learning rate adjustment, LaunchAgent-ready
 - **Optional C++** — LibTorch + C++ watchdog for no-Python deployments
@@ -257,6 +257,3 @@ Best order: **Prune → Distill → Quantize (P-KD-Q)**. Distillation first prod
 ## License
 
 MIT
-=======
-# distillation
->>>>>>> 8b1ec5e8f369b5d44422b10b10c3a14a59bad90d
