@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from data_pipeline import load_dataset_split, format_prompt_full, pretokenize, validate_dataset_schema, DATASET_HELP
+from data_pipeline import load_dataset_split, format_prompt_full, format_multiturn_full, pretokenize, validate_dataset_schema, DATASET_HELP
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(
@@ -40,6 +40,27 @@ logging.basicConfig(
 
 OPEN_TEACHER = "Qwen/Qwen2-1.5B-Instruct"
 OPEN_STUDENT = "Qwen/Qwen2-0.5B-Instruct"
+
+# Local MLX-converted model paths (pre-converted once via mlx_lm.convert, loads instantly)
+_MLX_LOCAL_PATHS = {
+    "Qwen/Qwen2-1.5B-Instruct": "airgap_bundle/mlx_models/qwen2-1.5b-instruct",
+    "Qwen/Qwen2-0.5B-Instruct": "airgap_bundle/mlx_models/qwen2-0.5b-instruct",
+    "meta-llama/Llama-3.2-8B-Instruct": "airgap_bundle/mlx_models/llama-3.2-8b-instruct",
+    "meta-llama/Llama-3.2-1B-Instruct": "airgap_bundle/mlx_models/llama-3.2-1b-instruct",
+}
+
+
+def _resolve_mlx_path(model_id: str) -> str:
+    """Return local MLX path if pre-converted, otherwise the original HF model ID."""
+    rel = _MLX_LOCAL_PATHS.get(model_id)
+    if rel:
+        # Check relative to cwd and relative to this script's repo root
+        for base in (Path.cwd(), Path(__file__).resolve().parent.parent):
+            candidate = base / rel
+            if candidate.exists() and any(candidate.iterdir()):
+                LOG.info("Using local MLX model: %s", candidate)
+                return str(candidate)
+    return model_id
 
 
 def parse_args():
@@ -74,6 +95,27 @@ def parse_args():
                         "0 = pure KD, 1 = pure CE. Stabilises training and improves convergence.")
     p.add_argument("--resume", action="store_true",
                    help="Resume from the last saved epoch checkpoint in output_dir.")
+    p.add_argument("--multi_turn_ratio", type=float, default=0.0,
+                   help="Fraction of samples formatted as full multi-turn ChatML conversations "
+                        "(0.0 = all single-turn, 1.0 = all multi-turn). "
+                        "Only effective for ShareGPT/messages datasets. (default: 0.0)")
+    p.add_argument("--precomp_bs", type=int, default=0,
+                   help="Batch size for teacher logit pre-computation. No gradients are needed "
+                        "so this can be much larger than --batch_size. 0 = auto (4× batch_size, "
+                        "minimum 16). Larger values reduce Metal dispatch overhead. (default: 0)")
+    # ── Phase 3: temperature annealing ───────────────────────────────────────────
+    p.add_argument("--temp_start", type=float, default=0.0,
+                   help="KD temperature at step 0. If >0 and != temp_end, linearly anneal from "
+                        "temp_start → temp_end over all training steps. 0 = use --kd_temp fixed. "
+                        "(default: 0, i.e. no annealing)")
+    p.add_argument("--temp_end", type=float, default=0.0,
+                   help="KD temperature at final step. Only used when temp_start > 0. (default: 0)")
+    p.add_argument("--hard_weight_start", type=float, default=-1.0,
+                   help="CE alpha (hard-label weight) at step 0. If >=0, linearly anneal from "
+                        "hard_weight_start → hard_weight_end. -1 = use --ce_alpha fixed. "
+                        "(default: -1, i.e. no annealing)")
+    p.add_argument("--hard_weight_end", type=float, default=-1.0,
+                   help="CE alpha at final step. Only used when hard_weight_start >=0. (default: -1)")
     return p.parse_args()
 
 
@@ -153,6 +195,10 @@ def _scale_grads(g, scale):
 def main():
     args = parse_args()
 
+    # Ensure HuggingFace fast tokenizers (Rust/Rayon) use all available CPU threads.
+    # Without this, HF may suppress parallelism with a warning when running from a subprocess.
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
+
     if not _check_mlx():
         sys.exit(1)
 
@@ -183,8 +229,9 @@ def main():
     _write_trainer_state(trainer_state_path, [])
 
     # ── Load teacher only first (student loaded after teacher is freed) ──────────
-    LOG.info("Loading teacher: %s", args.teacher)
-    teacher_model, teacher_tokenizer = mlx_load(args.teacher)
+    teacher_path = _resolve_mlx_path(args.teacher)
+    LOG.info("Loading teacher: %s", teacher_path)
+    teacher_model, teacher_tokenizer = mlx_load(teacher_path)
     teacher_model.freeze()
     LOG.info("Teacher loaded and frozen.")
 
@@ -195,7 +242,18 @@ def main():
     LOG.info("Train samples: %d", len(train_split))
     validate_dataset_schema(train_split, args.dataset, logger=LOG)
 
-    texts = [format_prompt_full(ex) for ex in train_split]
+    if args.multi_turn_ratio > 0.0:
+        texts = []
+        for ex in train_split:
+            if _random.random() < args.multi_turn_ratio:
+                texts.append(format_multiturn_full(ex, max_turns=4))
+            else:
+                texts.append(format_prompt_full(ex))
+        n_mt = sum(1 for t in texts if "<|im_start|>" in t)
+        LOG.info("Multi-turn formatting: %d/%d samples (ratio=%.2f)",
+                 n_mt, len(texts), args.multi_turn_ratio)
+    else:
+        texts = [format_prompt_full(ex) for ex in train_split]
 
     # ── Pre-tokenize entire dataset once ────────────────────────────────────────
     # Uses teacher tokenizer (same vocab as student for same model family).
@@ -212,9 +270,14 @@ def main():
     all_teacher_topk_values = np.zeros((n_samples, seq_len, K), dtype=np.float16)
     all_teacher_topk_indices = np.zeros((n_samples, seq_len, K), dtype=np.int32)
 
-    LOG.info("Pre-computing teacher top-%d logits for %d samples...", K, n_samples)
-    for precomp_start in range(0, n_samples, args.batch_size):
-        precomp_end = min(precomp_start + args.batch_size, n_samples)
+    # Use a larger batch for teacher precompute — no gradients means much lower memory pressure.
+    # More samples per Metal dispatch → fewer CPU-GPU sync points → faster precompute.
+    # Auto: 4× training batch size, min 16, max 32 (caps logits tensor at ~4 GB for 128k-vocab models)
+    precomp_bs = args.precomp_bs if args.precomp_bs > 0 else min(max(args.batch_size * 4, 16), 32)
+    LOG.info("Pre-computing teacher top-%d logits for %d samples (precomp_bs=%d)...",
+             K, n_samples, precomp_bs)
+    for precomp_start in range(0, n_samples, precomp_bs):
+        precomp_end = min(precomp_start + precomp_bs, n_samples)
         batch_ids = mx.array(all_input_ids[precomp_start:precomp_end])
         t_out = teacher_model(batch_ids)
         t_logits = t_out if isinstance(t_out, mx.array) else t_out.logits  # (B, T, V)
@@ -225,7 +288,7 @@ def main():
         all_teacher_topk_values[precomp_start:precomp_end] = np.array(topk_val.astype(mx.float32)).astype(np.float16)
         all_teacher_topk_indices[precomp_start:precomp_end] = np.array(topk_idx.astype(mx.int32))
         mx.clear_cache()  # free MLX intermediate buffers (logits, sort indices) after each batch
-        if precomp_end % max(args.batch_size * 10, 1) == 0 or precomp_end == n_samples:
+        if precomp_end % max(precomp_bs * 10, 1) == 0 or precomp_end == n_samples:
             LOG.info("  Teacher logits: %d/%d samples", precomp_end, n_samples)
 
     cache_mb = (all_teacher_topk_values.nbytes + all_teacher_topk_indices.nbytes) / 1e6
@@ -236,8 +299,9 @@ def main():
     mx.clear_cache()
 
     # ── Load student AFTER teacher is freed (avoids both models in memory at once) ──
-    LOG.info("Loading student: %s", args.student)
-    student_model, student_tokenizer = mlx_load(args.student)
+    student_path = _resolve_mlx_path(args.student)
+    LOG.info("Loading student: %s", student_path)
+    student_model, student_tokenizer = mlx_load(student_path)
 
     # Apply LoRA to student via mlx_lm helper (operates on last N transformer blocks)
     LOG.info("Applying LoRA (r=%d) to student...", args.lora_r)
@@ -269,30 +333,55 @@ def main():
     optimizer = optim.AdamW(learning_rate=lr_schedule)
     LOG.info("LR schedule: warmup %d steps → cosine decay over %d steps", _warmup_steps, _cosine_steps)
 
+    # ── Phase 3 annealing helpers ────────────────────────────────────────────────
+    _do_temp_anneal = args.temp_start > 0.0 and args.temp_end > 0.0
+    _do_alpha_anneal = args.hard_weight_start >= 0.0 and args.hard_weight_end >= 0.0
+
+    def _anneal(start, end, step, total):
+        return start + (end - start) * min(step / max(total, 1), 1.0)
+
+    def _current_temp(step):
+        if not _do_temp_anneal:
+            return args.kd_temp
+        return _anneal(args.temp_start, args.temp_end, step, _total_steps)
+
+    def _current_alpha(step):
+        if not _do_alpha_anneal:
+            return args.ce_alpha
+        return _anneal(args.hard_weight_start, args.hard_weight_end, step, _total_steps)
+
+    if _do_temp_anneal:
+        LOG.info("Temperature annealing: %.2f → %.2f over %d steps",
+                 args.temp_start, args.temp_end, _total_steps)
+    if _do_alpha_anneal:
+        LOG.info("CE-alpha annealing: %.2f → %.2f over %d steps",
+                 args.hard_weight_start, args.hard_weight_end, _total_steps)
+
     # ── KD loss: forward KL (top-K sparse) + optional CE ────────────────────────
-    def kd_loss(model, input_ids, attention_mask, t_topk_values, t_topk_indices):
+    # kd_temp and ce_alpha are passed per-step to support Phase 3 annealing.
+    # nn.value_and_grad differentiates w.r.t. model parameters; the extra args
+    # (kd_temp, ce_alpha) are treated as constants during the backward pass.
+    def kd_loss(model, input_ids, attention_mask, t_topk_values, t_topk_indices,
+                kd_temp, ce_alpha):
         """Mixed loss: ce_alpha * CE + (1 - ce_alpha) * forward-KL.
 
         t_topk_values:  (B, T, K) float32 — raw teacher logits at top-K vocab positions
         t_topk_indices: (B, T, K) int32   — vocab indices of those K positions
-
-        CE term: next-token prediction loss (student predicts input_ids[t+1] at step t).
-        KD term: forward KL between teacher's truncated top-K distribution and student.
-        Mixing with ce_alpha ∈ [0, 1] (default 0.1) prevents mode collapse and
-        stabilises early training.
+        kd_temp:        scalar float — KD temperature (supports per-step annealing)
+        ce_alpha:       scalar float — CE weight (supports per-step annealing)
         """
         s_out = model(input_ids)
         s_logits = s_out if isinstance(s_out, mx.array) else s_out.logits       # (B, T, V)
 
         # ── KD term ──────────────────────────────────────────────────────────────
-        s_log_probs = nn.log_softmax(s_logits / args.kd_temp, axis=-1)          # (B, T, V)
+        s_log_probs = nn.log_softmax(s_logits / kd_temp, axis=-1)               # (B, T, V)
         s_log_probs_topk = mx.take_along_axis(s_log_probs, t_topk_indices, axis=-1)  # (B, T, K)
-        t_probs = nn.softmax(t_topk_values / args.kd_temp, axis=-1)             # (B, T, K)
+        t_probs = nn.softmax(t_topk_values / kd_temp, axis=-1)                  # (B, T, K)
         mask = attention_mask[..., None].astype(mx.float32)                      # (B, T, 1)
         kl = (t_probs * (mx.log(t_probs + 1e-9) - s_log_probs_topk)) * mask
         kd = kl.sum(axis=-1).mean()
 
-        if args.ce_alpha == 0.0:
+        if ce_alpha == 0.0:
             return kd
 
         # ── CE term: next-token prediction ───────────────────────────────────────
@@ -303,7 +392,7 @@ def main():
         ce_nll     = -mx.take_along_axis(ce_log_p, ce_targets, axis=-1).squeeze(-1)  # (B, T-1)
         ce = (ce_nll * ce_mask).sum() / mx.maximum(ce_mask.sum(), 1.0)
 
-        return args.ce_alpha * ce + (1.0 - args.ce_alpha) * kd
+        return ce_alpha * ce + (1.0 - ce_alpha) * kd
 
     loss_and_grad = nn.value_and_grad(student_model, kd_loss)
 
@@ -365,7 +454,8 @@ def main():
                 t_topk_i       = mx.array(all_teacher_topk_indices[mini_idx])
 
                 loss_val, grads = loss_and_grad(
-                    student_model, input_ids, attention_mask, t_topk_v, t_topk_i
+                    student_model, input_ids, attention_mask, t_topk_v, t_topk_i,
+                    _current_temp(global_step), _current_alpha(global_step),
                 )
                 mx.eval(loss_val, grads)
                 accum_loss += float(loss_val) / grad_acc
@@ -402,7 +492,8 @@ def main():
                     _emsk = eval_mask[_eb: _eb + batch_size]
                     _etv  = eval_topk_values[_eb: _eb + batch_size]
                     _eti  = eval_topk_indices[_eb: _eb + batch_size]
-                    _el = kd_loss(student_model, _eids, _emsk, _etv, _eti)
+                    _el = kd_loss(student_model, _eids, _emsk, _etv, _eti,
+                                  _current_temp(global_step), _current_alpha(global_step))
                     mx.eval(_el)
                     eval_losses.append(float(_el))
                     mx.clear_cache()

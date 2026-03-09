@@ -41,10 +41,11 @@ def load_dataset_split(dataset_path, max_samples=None, cache_dir=None, offline=F
             return ds
         except Exception:
             pass
-        # Fall back to explicit disk cache (created by cache_datasets.py)
+        # Fall back to explicit disk cache (created by cache_datasets.py / airgap.py prepare)
         cache_candidates = [
             Path("datasets_cache") / dataset_path.replace("/", "___"),
             Path("scripts/datasets_cache") / dataset_path.replace("/", "___"),
+            Path("airgap_bundle/datasets_cache") / dataset_path.replace("/", "__"),
         ]
         for c in cache_candidates:
             if c.exists():
@@ -211,6 +212,59 @@ def format_prompt_full(example):
     """
     prompt, response = _extract_pair(example)
     return prompt + "\n\n### Response:\n" + response
+
+
+def format_multiturn_full(example, max_turns=4):
+    """Format a multi-turn conversation as a full ChatML string.
+
+    Renders all turns (up to max_turns user+assistant pairs) using the
+    <|im_start|>/<|im_end|> chat template. Falls back to format_prompt_full
+    for single-turn schemas (alpaca, dpo, guanaco).
+
+    Used by: distill_mlx.py when --multi_turn_ratio > 0.
+    """
+    schema = _detect_schema(example)
+
+    if schema == "sharegpt":
+        parts = []
+        pair_count = 0
+        for turn in example.get("conversations", []):
+            if pair_count >= max_turns:
+                break
+            role = turn.get("from", turn.get("role", ""))
+            value = turn.get("value", turn.get("content", "")).strip()
+            if not value:
+                continue
+            if role == "system":
+                parts.append(f"<|im_start|>system\n{value}<|im_end|>")
+            elif role in ("human", "user"):
+                parts.append(f"<|im_start|>user\n{value}<|im_end|>")
+            elif role in ("gpt", "assistant"):
+                parts.append(f"<|im_start|>assistant\n{value}<|im_end|>")
+                pair_count += 1
+        return "\n".join(parts)
+
+    if schema == "messages":
+        parts = []
+        pair_count = 0
+        for msg in example.get("messages", []):
+            if pair_count >= max_turns:
+                break
+            role = msg.get("role", "")
+            content = msg.get("content", "").strip()
+            if not content:
+                continue
+            if role == "system":
+                parts.append(f"<|im_start|>system\n{content}<|im_end|>")
+            elif role == "user":
+                parts.append(f"<|im_start|>user\n{content}<|im_end|>")
+            elif role == "assistant":
+                parts.append(f"<|im_start|>assistant\n{content}<|im_end|>")
+                pair_count += 1
+        return "\n".join(parts)
+
+    # Single-turn schemas — fall back to standard formatting
+    return format_prompt_full(example)
 
 
 def pretokenize(tokenizer, texts, max_length=512):

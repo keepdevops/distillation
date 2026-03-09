@@ -15,7 +15,9 @@ STUDENT_DIR="${1:-./distilled-minillm}"
 # llama.cpp: ./llama.cpp (if cloned into project) or ../llama.cpp
 LLAMA_CPP="${2}"
 if [[ -z "$LLAMA_CPP" ]]; then
-  if [[ -d "./llama.cpp" ]]; then
+  if [[ -d "/Users/Shared/llama" ]]; then
+    LLAMA_CPP="/Users/Shared/llama"
+  elif [[ -d "./llama.cpp" ]]; then
     LLAMA_CPP="./llama.cpp"
   else
     LLAMA_CPP="../llama.cpp"
@@ -40,8 +42,10 @@ fi
 
 STUDENT_ABS=$(cd "$STUDENT_DIR" && pwd)
 OUT_NAME=$(basename "$STUDENT_ABS")-${OUTTYPE}.gguf
-OUT_FILE="$STUDENT_ABS/$OUT_NAME"
+GGUF_DIR="/Users/Shared/llama/models"
+mkdir -p "$GGUF_DIR"
+OUT_FILE="$GGUF_DIR/$OUT_NAME"
 
 echo "Converting $STUDENT_ABS -> $OUT_FILE (outtype=$OUTTYPE)"
 python "$CONVERT" "$STUDENT_ABS" --outfile "$OUT_FILE" --outtype "$OUTTYPE"
-echo "Done. Run: llama-server -m $OUT_FILE"
+echo "Done. Run: /Users/Shared/llama/llama-server -m $OUT_FILE"

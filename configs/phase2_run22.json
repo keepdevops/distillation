@@ -1,0 +1,21 @@
+{
+  "_comment": "run-2.2: Baseline comparison — Alpaca-cleaned 15k",
+  "dataset": "yahma/alpaca-cleaned",
+  "max_samples": 15000,
+  "epochs": 3,
+  "learning_rate": 1e-5,
+  "temperature": 1.8,
+  "lora_r": 16,
+  "batch_size": 4,
+  "grad_acc": 4,
+  "ce_alpha": 0.1,
+  "multi_turn_ratio": 0.0,
+  "output_dir": "./runs/phase2-alpaca-clean-15k",
+  "open": true,
+  "backend": "mlx",
+  "export": "gguf",
+  "seed": 42,
+  "log_experiment": true,
+  "watchdog": true,
+  "skip_eval": false
+}

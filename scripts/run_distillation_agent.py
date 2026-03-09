@@ -297,6 +297,11 @@ def _build_distill_cmd(args, output_dir: Path,
             "--lora_r", str(args.lora_r),
             "--q_bits", str(args.q_bits),
             "--seed", str(trial_seed),
+            "--batch_size", str(getattr(args, "batch_size", 2)),
+            "--grad_acc", str(getattr(args, "grad_acc", 4)),
+            "--learning_rate", str(getattr(args, "learning_rate", 2e-4)),
+            "--ce_alpha", str(getattr(args, "ce_alpha", 0.1)),
+            "--multi_turn_ratio", str(getattr(args, "multi_turn_ratio", 0.0)),
         ]
         _ds = dataset_override or getattr(args, "dataset", None)
         if _ds:
@@ -309,6 +314,18 @@ def _build_distill_cmd(args, output_dir: Path,
             cmd.append("--watchdog")
         if args.export not in ("mlx", "all"):
             cmd.append("--no_export")
+        if getattr(args, "resume", False):
+            cmd.append("--resume")
+        # ── Phase 3 annealing args (only forwarded when present in config) ──────
+        if getattr(args, "temp_start", 0.0) > 0:
+            cmd += ["--temp_start", str(args.temp_start),
+                    "--temp_end", str(getattr(args, "temp_end", args.temperature))]
+        if getattr(args, "hard_weight_start", -1.0) >= 0:
+            cmd += ["--hard_weight_start", str(args.hard_weight_start),
+                    "--hard_weight_end", str(getattr(args, "hard_weight_end",
+                                                     getattr(args, "ce_alpha", 0.1)))]
+        if getattr(args, "topk_logits", 0) > 0:
+            cmd += ["--topk_logits", str(args.topk_logits)]
 
     else:  # unsloth
         cmd = [
@@ -341,6 +358,8 @@ def main():
     ap.add_argument("--open", action="store_true", help="Use Qwen2 open models (no HF login)")
     ap.add_argument("--offline", action="store_true", help="Air-gapped: local cache only")
     ap.add_argument("--watchdog", action="store_true", help="Enable pause.flag / plateau detection")
+    ap.add_argument("--resume", action="store_true",
+                    help="Resume from last epoch checkpoint in output_dir (MLX only)")
     ap.add_argument(
         "--backend",
         type=str,
@@ -386,6 +405,16 @@ def main():
                     help="Re-rank filtered candidates by teacher log-probability")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--max_samples", type=int, default=2000)
+    ap.add_argument("--batch_size", type=int, default=2,
+                    help="Per-device batch size (default: 2)")
+    ap.add_argument("--grad_acc", type=int, default=4,
+                    help="Gradient accumulation steps (default: 4)")
+    ap.add_argument("--learning_rate", type=float, default=2e-4,
+                    help="Learning rate (default: 2e-4)")
+    ap.add_argument("--ce_alpha", type=float, default=0.1,
+                    help="CE loss weight mixed with KD loss (default: 0.1)")
+    ap.add_argument("--multi_turn_ratio", type=float, default=0.0,
+                    help="Fraction of samples formatted as multi-turn ChatML (default: 0.0)")
     ap.add_argument("--temperature", type=float, default=1.0,
                     help="KD temperature (default 1.0)")
     ap.add_argument("--lora_r", type=int, default=16,

@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import sys
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -137,6 +138,45 @@ def score_example(instruction: str, response: str) -> float:
     return r_len_score + sent_div * 0.10 + i_len_score + task_bonus + question_bonus + specificity
 
 
+# ── Parallel worker functions (module-level for ProcessPool pickling) ─────────
+
+def _filter_one(args):
+    """Pass 1 worker. Returns (reject_key, None) or (None, item_dict)."""
+    ex, min_instr, max_instr, min_resp, max_resp, min_d2 = args
+    instruction, response = _extract_pair(ex)
+    if not instruction or not response:
+        return "filtered_empty", None
+    i_words = len(instruction.split())
+    r_words = len(response.split())
+    if i_words < min_instr or i_words > max_instr:
+        return "filtered_instruction_length", None
+    if r_words < min_resp or r_words > max_resp:
+        return "filtered_response_length", None
+    if is_refusal(response):
+        return "filtered_refusal", None
+    if is_noise(response):
+        return "filtered_noise", None
+    if distinct2(response) < min_d2:
+        return "filtered_distinct2", None
+    return None, {
+        "instruction": instruction,
+        "input": ex.get("input", "").strip() if hasattr(ex, "get") else "",
+        "output": response,
+        "_score": score_example(instruction, response),
+    }
+
+
+def _dup_check(args):
+    """Pass 2 worker. Returns True if item_ng is a near-dup of any set in window_ngs.
+    Operates on pre-computed frozenset n-grams — no string tokenization overhead."""
+    item_ng, window_ngs, threshold = args
+    for wng in window_ngs:
+        u = item_ng | wng
+        if u and len(item_ng & wng) / len(u) > threshold:
+            return True
+    return False
+
+
 def minhash_dedup(items: list, threshold: float, num_perm: int = 128) -> tuple[list, int] | None:
     """Global near-dedup via MinHash LSH. Returns None if datasketch not installed."""
     try:
@@ -229,6 +269,9 @@ def parse_args():
                    help="Batch size for teacher scoring forward passes (default: 1)")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true")
+    p.add_argument("--workers", type=int, default=0,
+                   help="Worker processes for parallel filtering and dedup. "
+                        "0 = auto (cpu_count - 1, max 12). (default: 0)")
     return p.parse_args()
 
 
@@ -262,50 +305,24 @@ def main():
         "n_final": 0,
     }
 
-    # ── Pass 1: per-example quality filters ──────────────────────────────────
+    n_workers = args.workers if args.workers > 0 else min(max(1, (cpu_count() or 1) - 1), 12)
+    logger.info("Using %d worker processes", n_workers)
+
+    # ── Pass 1: per-example quality filters (parallel) ───────────────────────
+    # Each example is independent — embarrassingly parallel via Pool.imap.
+    # chunksize=200 amortizes IPC overhead across ~N/200 round-trips.
     passed = []
-    for ex in ds:
-        instruction, response = _extract_pair(ex)
-
-        # Empty fields
-        if not instruction or not response:
-            stats["filtered_empty"] += 1
-            continue
-
-        i_words = len(instruction.split())
-        r_words = len(response.split())
-
-        # Instruction length
-        if i_words < args.min_instruction_words or i_words > MAX_INSTRUCTION_WORDS:
-            stats["filtered_instruction_length"] += 1
-            continue
-
-        # Response length
-        if r_words < args.min_response_words or r_words > args.max_response_words:
-            stats["filtered_response_length"] += 1
-            continue
-
-        # Refusal
-        if is_refusal(response):
-            stats["filtered_refusal"] += 1
-            continue
-
-        # Noise
-        if is_noise(response):
-            stats["filtered_noise"] += 1
-            continue
-
-        # Distinct-2
-        if distinct2(response) < args.min_distinct2:
-            stats["filtered_distinct2"] += 1
-            continue
-
-        passed.append({
-            "instruction": instruction,
-            "input": ex.get("input", "").strip() if hasattr(ex, "get") else "",
-            "output": response,
-            "_score": score_example(instruction, response),
-        })
+    task_args = [
+        (ex, args.min_instruction_words, MAX_INSTRUCTION_WORDS,
+         args.min_response_words, args.max_response_words, args.min_distinct2)
+        for ex in ds
+    ]
+    with Pool(n_workers) as pool:
+        for reason, item in pool.imap(_filter_one, task_args, chunksize=200):
+            if reason:
+                stats[reason] += 1
+            elif item:
+                passed.append(item)
 
     logger.info(
         "Pass 1 complete: %d / %d passed  "
@@ -340,18 +357,41 @@ def main():
                 )
 
         if deduped is None:  # sliding-window fallback
-            logger.info("Pass 2: sliding-window Jaccard dedup (threshold=%.2f, window=500)...",
-                        args.jaccard_threshold)
+            # Pre-compute 3-gram frozensets once for all items.
+            # Avoids re-tokenizing each instruction O(N × window) times in the
+            # inner loop — ~5–10× cheaper than calling jaccard() directly.
+            all_ngs = [
+                frozenset(ngrams(item["instruction"].lower().split(), 3))
+                for item in passed
+            ]
+            logger.info(
+                "Pass 2: parallel sliding-window Jaccard dedup "
+                "(threshold=%.2f, window=500, batch=256, workers=%d)...",
+                args.jaccard_threshold, n_workers,
+            )
+            # Process candidates in batches. Each batch checks against a
+            # snapshot of the window taken before the batch starts, so items
+            # within the same batch don't de-dup against each other (minor
+            # approximation; acceptable for distillation data at this scale).
+            _DEDUP_BATCH = 256
             deduped = []
-            accepted_instrs: list[str] = []
-            for item in passed:
-                instr = item["instruction"]
-                window = accepted_instrs[-500:]
-                if any(jaccard(instr, ex) > args.jaccard_threshold for ex in window):
-                    stats["filtered_dedup"] += 1
-                    continue
-                deduped.append(item)
-                accepted_instrs.append(instr)
+            accepted_ngs: list = []
+            with Pool(n_workers) as pool:
+                for batch_start in range(0, len(passed), _DEDUP_BATCH):
+                    batch_end = min(batch_start + _DEDUP_BATCH, len(passed))
+                    batch_items = passed[batch_start:batch_end]
+                    batch_ngs = all_ngs[batch_start:batch_end]
+                    window_snap = accepted_ngs[-500:]   # snapshot before this batch
+                    dup_flags = pool.map(
+                        _dup_check,
+                        [(ng, window_snap, args.jaccard_threshold) for ng in batch_ngs],
+                    )
+                    for item, item_ng, is_dup in zip(batch_items, batch_ngs, dup_flags):
+                        if is_dup:
+                            stats["filtered_dedup"] += 1
+                        else:
+                            deduped.append(item)
+                            accepted_ngs.append(item_ng)
             logger.info(
                 "Pass 2 complete: %d / %d after dedup (removed %d near-dups)",
                 len(deduped), len(passed), stats["filtered_dedup"],

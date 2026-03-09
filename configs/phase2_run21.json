@@ -1,0 +1,21 @@
+{
+  "_comment": "run-2.1: First quality jump — Magpie-Pro filtered 12k",
+  "dataset": "Magpie-Align/Magpie-Pro-300K-Filtered",
+  "max_samples": 12000,
+  "epochs": 3,
+  "learning_rate": 1e-5,
+  "temperature": 2.0,
+  "lora_r": 16,
+  "batch_size": 4,
+  "grad_acc": 4,
+  "ce_alpha": 0.1,
+  "multi_turn_ratio": 0.3,
+  "output_dir": "./runs/phase2-magpie-12k-hybrid",
+  "open": true,
+  "backend": "mlx",
+  "export": "gguf",
+  "seed": 42,
+  "log_experiment": true,
+  "watchdog": true,
+  "skip_eval": false
+}

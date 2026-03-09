@@ -64,6 +64,8 @@ datasets_cache/
 data/
 *.arrow
 *.parquet
+magpie_data/
+test-*
 
 # Distillation outputs
 distilled-*/

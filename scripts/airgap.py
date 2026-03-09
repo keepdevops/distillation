@@ -86,12 +86,42 @@ def verify_checksums(sums_file: Path):
 # prepare
 # ---------------------------------------------------------------------------
 
+MLX_CONVERT_MAP = {
+    "Qwen/Qwen2-1.5B-Instruct": "qwen2-1.5b-instruct",
+    "Qwen/Qwen2-0.5B-Instruct": "qwen2-0.5b-instruct",
+    "meta-llama/Llama-3.2-8B-Instruct": "llama-3.2-8b-instruct",
+    "meta-llama/Llama-3.2-1B-Instruct": "llama-3.2-1b-instruct",
+}
+
+
+def _convert_mlx(hf_path: str, mlx_path: Path, q_bits: int = 4):
+    """Convert a cached HF model to MLX format using mlx_lm.convert."""
+    if mlx_path.exists() and any(mlx_path.iterdir()):
+        log.info("  MLX already exists, skipping: %s", mlx_path)
+        return
+    mlx_path.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable, "-m", "mlx_lm", "convert",
+        "--hf-path", hf_path,
+        "--mlx-path", str(mlx_path),
+        "--q-bits", str(q_bits),
+    ]
+    log.info("  Converting to MLX (q%d): %s -> %s", q_bits, hf_path, mlx_path)
+    result = subprocess.run(cmd, capture_output=False)
+    if result.returncode != 0:
+        log.warning("  MLX conversion failed for %s (non-fatal)", hf_path)
+    else:
+        log.info("  MLX conversion done: %s", mlx_path)
+
+
 def cmd_prepare(args):
     output = Path(args.output).resolve()
     hf_cache = output / "hf_cache"
     ds_cache = output / "datasets_cache"
+    mlx_models = output / "mlx_models"
     hf_cache.mkdir(parents=True, exist_ok=True)
     ds_cache.mkdir(parents=True, exist_ok=True)
+    mlx_models.mkdir(parents=True, exist_ok=True)
 
     os.environ["HF_HOME"] = str(hf_cache)
     os.environ["HF_DATASETS_CACHE"] = str(ds_cache)
@@ -122,6 +152,24 @@ def cmd_prepare(args):
     if failed and not args.open:
         log.error("Required models failed — check HF login: %s", failed)
         sys.exit(1)
+
+    # --- MLX conversion (Apple Silicon — one-time, loads instantly offline) ---
+    log.info("=" * 60)
+    log.info("STEP 1b/3  Converting models to MLX format -> %s", mlx_models)
+    log.info("=" * 60)
+    causal_models = [m for m in models if any(k in m for k in ("Qwen", "Llama", "llama", "GPT", "gpt"))]
+    for name in causal_models:
+        short = MLX_CONVERT_MAP.get(name)
+        if short is None:
+            continue
+        # Resolve actual snapshot path from hf_cache
+        hf_model_dir = hf_cache / ("models--" + name.replace("/", "--"))
+        snapshots = sorted((hf_model_dir / "snapshots").iterdir()) if (hf_model_dir / "snapshots").exists() else []
+        if not snapshots:
+            log.warning("  No HF snapshot found for %s — skipping MLX conversion", name)
+            continue
+        snapshot_path = snapshots[-1]  # latest snapshot
+        _convert_mlx(str(snapshot_path), mlx_models / short)
 
     # --- datasets ---
     log.info("=" * 60)

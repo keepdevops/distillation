@@ -1,0 +1,21 @@
+{
+  "_comment": "run-2.3: Synthetic from local model (Magpie-style) 10k",
+  "dataset": "./magpie_data/hf_dataset",
+  "max_samples": 10000,
+  "epochs": 3,
+  "learning_rate": 8e-6,
+  "temperature": 2.2,
+  "lora_r": 24,
+  "batch_size": 2,
+  "grad_acc": 8,
+  "ce_alpha": 0.1,
+  "multi_turn_ratio": 0.2,
+  "output_dir": "./runs/phase2-synthetic-10k",
+  "open": true,
+  "backend": "mlx",
+  "export": "gguf",
+  "seed": 42,
+  "log_experiment": true,
+  "watchdog": true,
+  "skip_eval": false
+}
