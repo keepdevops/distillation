@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -408,4 +409,5 @@ def main():
 
 
 if __name__ == "__main__":
+    subprocess.Popen(['caffeinate', '-i', 'sleep', '3600'])
     main()

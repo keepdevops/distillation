@@ -1,7 +1,21 @@
 # Phase 1 Speedup Optimizations
 
 **Implementation Date:** 2026-03-03
-**Expected Speedup:** 40-50% (2-3 hours saved per 5-trial run)
+**Expected Speedup:** 40–50% (2–3 hours saved per 5-trial run)
+
+> **See also:** [ARCHITECTURE.md](ARCHITECTURE.md) for full in-depth explanations of all optimization phases, including Phase 1.5 and the cumulative impact table.
+
+---
+
+## Backend Compatibility Summary
+
+| Optimization | CUDA (RTX) | MPS (Apple Silicon) | MLX | Unsloth |
+|-------------|-----------|---------------------|-----|---------|
+| Flash Attention 2 | ✅ (2–3×) | ❌ (not compatible) | ❌ (own kernels) | ✅ |
+| torch.compile() | ✅ (20–40%) | ❌ (InductorError) | ❌ (not PyTorch) | ✅ |
+| Reduced eval_steps | ✅ | ✅ | ✅ | ✅ |
+
+**For Apple Silicon, use the MLX backend** (`distill_mlx.py`) to get 2–5× speedup via native Metal kernels without needing Flash Attention or torch.compile(). See [BACKEND_OPTIMIZATIONS.md](BACKEND_OPTIMIZATIONS.md).
 
 ---
 

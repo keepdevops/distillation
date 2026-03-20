@@ -162,9 +162,8 @@ python scripts/eval_gradio.py \
 ```bash
 # User: charlie
 export MODEL_PATH=/Users/Shared/models
-python scripts/export_student_gguf.py \
-  --model_path $MODEL_PATH/distilled-by-alice \
-  --output_dir $MODEL_PATH/distilled-by-alice
+./scripts/export_student_gguf.sh $MODEL_PATH/distilled-by-alice
+# GGUF written into the same directory
 ```
 
 Everyone can now use the GGUF file!

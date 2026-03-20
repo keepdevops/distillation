@@ -10,6 +10,7 @@ Usage (standalone CLI):
     python scripts/experiment_log.py --show 10
     python scripts/experiment_log.py --show 5 --log ./experiment_log.jsonl
 """
+from __future__ import annotations
 
 import argparse
 import json

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# start.sh — Start distill background services
+# start.sh — Start distill background services in a tmux session with caffeinate
 #
 # Usage:
 #   ./scripts/start.sh                        # watchdog + dashboard
@@ -10,16 +10,15 @@
 #   ./scripts/start.sh --backend=unsloth      # pass backend to training launcher
 #   ./scripts/start.sh --export=all           # pass export format to training launcher
 #
-# Services started:
-#   - training_watchdog.py  (background daemon, PID logged)
-#   - dashboard.py          (Gradio UI at http://127.0.0.1:7860)
-#   - [optional] monitor_cpu_gpu_temp.py  (uses mactop, no sudo)
+# Services run in tmux session 'distill', each in a separate window, under caffeinate.
+# Attach with: tmux attach -t distill
+# Stop with:   ./scripts/stop.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-PID_FILE="$ROOT_DIR/.distill.pids"
+SESSION="distill"
 
 # Parse flags
 MONITOR=false
@@ -36,57 +35,54 @@ for arg in "$@"; do
   esac
 done
 
-# Kill any already-running instances of managed services to prevent duplicates
+# Check dependencies
+if ! command -v tmux &>/dev/null; then
+  echo "Error: tmux not found. Install with: brew install tmux"
+  exit 1
+fi
+
+# Kill any existing distill session and stale processes
+echo "==> Cleaning up existing session and processes..."
+tmux kill-session -t "$SESSION" 2>/dev/null || true
 pkill -f "[m]onitor_cpu_gpu_temp" 2>/dev/null || true
 pkill -f "[t]raining_watchdog\.py" 2>/dev/null || true
 pkill -f "[d]ashboard\.py"        2>/dev/null || true
 pkill -f "[e]val_gradio\.py"      2>/dev/null || true
 sleep 1
 
-# Clear old PID file
-> "$PID_FILE"
+echo "==> Starting distill services in tmux session '$SESSION'..."
 
-echo "==> Starting distill services..."
-
-# --- Training watchdog ---
-echo -n "    watchdog       ... "
 WATCHDOG_DIR="${DISTILL_OUTPUT_DIR:-$ROOT_DIR/distilled-minillm}"
-python "$SCRIPT_DIR/training_watchdog.py" "$WATCHDOG_DIR" \
-  --config "$ROOT_DIR/configs/watchdog_rules.json" \
-  >> "$ROOT_DIR/watchdog.log" 2>&1 &
-WATCHDOG_PID=$!
-echo "$WATCHDOG_PID  training_watchdog.py" >> "$PID_FILE"
-echo "PID $WATCHDOG_PID"
 
-# --- Dashboard or Eval UI ---
+# --- Window 0: Training watchdog ---
+tmux new-session -d -s "$SESSION" -n "watchdog" -x 220 -y 50
+tmux send-keys -t "$SESSION:watchdog" \
+  "caffeinate -dims pixi run python $SCRIPT_DIR/training_watchdog.py $WATCHDOG_DIR --config $ROOT_DIR/configs/watchdog_rules.json 2>&1 | tee -a $ROOT_DIR/watchdog.log" Enter
+echo "    watchdog       → $SESSION:watchdog"
+
+# --- Window 1: Dashboard or Eval UI ---
+tmux new-window -t "$SESSION" -n "dashboard"
 if [ "$EVAL_UI" = true ]; then
-  echo -n "    eval_gradio    ... "
-  python "$SCRIPT_DIR/eval_gradio.py" \
-    >> "$ROOT_DIR/eval_gradio.log" 2>&1 &
-  UI_PID=$!
-  echo "$UI_PID  eval_gradio.py" >> "$PID_FILE"
-  echo "PID $UI_PID  → http://127.0.0.1:7860"
+  tmux send-keys -t "$SESSION:dashboard" \
+    "caffeinate -dims pixi run python $SCRIPT_DIR/eval_gradio.py 2>&1 | tee -a $ROOT_DIR/eval_gradio.log" Enter
+  echo "    eval_gradio    → $SESSION:dashboard  (http://127.0.0.1:7860)"
 else
-  echo -n "    dashboard      ... "
-  python "$SCRIPT_DIR/dashboard.py" \
-    >> "$ROOT_DIR/dashboard.log" 2>&1 &
-  UI_PID=$!
-  echo "$UI_PID  dashboard.py" >> "$PID_FILE"
-  echo "PID $UI_PID  → http://127.0.0.1:7860"
+  tmux send-keys -t "$SESSION:dashboard" \
+    "caffeinate -dims pixi run python $SCRIPT_DIR/dashboard.py 2>&1 | tee -a $ROOT_DIR/dashboard.log" Enter
+  echo "    dashboard      → $SESSION:dashboard  (http://127.0.0.1:7860)"
 fi
 
-# --- Thermal monitor (optional, no sudo needed — uses mactop) ---
+# --- Window 2: Thermal monitor (optional) ---
 if [ "$MONITOR" = true ]; then
-  echo -n "    thermal monitor... "
-  python "$SCRIPT_DIR/monitor_cpu_gpu_temp.py" \
-    --interval 3 --log "$ROOT_DIR/thermal.log" \
-    --fan-threshold 75 --fan-max-temp 90 \
-    >> /dev/null 2>&1 &
-  MON_PID=$!
-  echo "$MON_PID  monitor_cpu_gpu_temp.py" >> "$PID_FILE"
-  echo "PID $MON_PID"
+  tmux new-window -t "$SESSION" -n "thermal"
+  tmux send-keys -t "$SESSION:thermal" \
+    "caffeinate -dims pixi run python $SCRIPT_DIR/monitor_cpu_gpu_temp.py --interval 3 --log $ROOT_DIR/thermal.log --fan-threshold 75 --fan-max-temp 90" Enter
+  echo "    thermal        → $SESSION:thermal"
 fi
+
+tmux select-window -t "$SESSION:watchdog"
 
 echo ""
-echo "==> Services running. PIDs saved to $PID_FILE"
-echo "    Stop with: ./scripts/stop.sh"
+echo "==> All services started."
+echo "    Attach : tmux attach -t $SESSION"
+echo "    Stop   : ./scripts/stop.sh"

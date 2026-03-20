@@ -1,20 +1,22 @@
 # Autonomous Training Watchdog
 
-Deterministic rules for self-optimization during long distillation runs. No LLM agent—just heartbeat checks, plateau detection, and atomic writes. Production-safe on M3 Max.
+ML-specific monitoring for long distillation runs. Detects loss plateau and divergence via deterministic rules. No LLM agent — just heartbeat checks and atomic writes. Production-safe on M3 Max.
+
+**Thermal protection is separate:** Use `thermal_agent.py` for hardware temperature monitoring. The watchdog handles ML-specific signals (loss curves) only.
 
 ## Architecture
 
 ```
 ┌─────────────────────┐     poll      ┌──────────────────────────┐
-│  training_watchdog  │ ────────────▶  │ trainer_state.json       │
-│  (LaunchAgent or    │               │ (HuggingFace Trainer)    │
+│  training_watchdog  │ ────────────▶ │ trainer_state.json        │
+│  (LaunchAgent or    │               │ (written by training loop) │
 │   terminal)         │               └──────────────────────────┘
 └─────────┬───────────┘
           │ writes
           ▼
 ┌─────────────────────┐     reads     ┌──────────────────────────┐
-│ watchdog_suggestions│ ◀──────────── │ PauseFlagCallback        │
-│ pause.flag          │               │ (in Trainer)             │
+│ watchdog_suggestions│ ◀──────────── │ PauseFlagCallback         │
+│ pause.flag          │               │ (in Trainer / --watchdog) │
 └─────────────────────┘               └──────────────────────────┘
 ```
 
@@ -22,23 +24,39 @@ Deterministic rules for self-optimization during long distillation runs. No LLM 
 
 | Rule | Trigger | Action |
 |------|---------|--------|
-| Plateau | Last 3 loss deltas < 0.001 | `next_lr_scale *= 0.8` (for next run) |
-| Thermal | CPU power > threshold (mW) or thermal pressure | Write `pause.flag` → Trainer saves and exits |
+| **Plateau** | Last N loss deltas all < `max_delta` (default 0.001) | Writes `watchdog_suggestions.json` with scaled LR recommendation |
+| **Divergence** | Recent avg loss > baseline avg × `threshold` (default 1.5×) | Writes `pause.flag` immediately → trainer saves and exits |
 
-Validator: backs up before overwrite; clamps `lr_scale` to ≥ 0.5.
+Minimum points (`min_points`) must be logged before either check activates.
 
 ## Quick Start
 
-### 1. Run watchdog (terminal)
+### 1. Enable pause.flag support in training
+
+Add `--watchdog` to any training command:
+
+```bash
+# MLX backend (recommended)
+python scripts/distill_mlx.py --open --watchdog --output_dir ./distilled-mlx
+
+# PyTorch backend
+python scripts/distill_minillm.py --open --watchdog --output_dir ./distilled-minillm
+```
+
+### 2. Run watchdog in a separate terminal
 
 **Python:**
 
 ```bash
-# One-off check
-python scripts/training_watchdog.py ./distilled-minillm --once
-
 # Continuous (every 60s)
-python scripts/training_watchdog.py ./distilled-minillm --interval 60
+python scripts/training_watchdog.py ./distilled-mlx --interval 60
+
+# With config file
+python scripts/training_watchdog.py ./distilled-mlx --interval 60 \
+  --config configs/watchdog_rules.json
+
+# One-off check
+python scripts/training_watchdog.py ./distilled-mlx --once
 ```
 
 **C++** (no Python, lighter):
@@ -46,13 +64,7 @@ python scripts/training_watchdog.py ./distilled-minillm --interval 60
 ```bash
 cd cpp && mkdir -p build && cd build
 cmake .. && cmake --build .
-./watchdog ../../distilled-minillm --interval 60 --config ../../configs/watchdog_rules.json
-```
-
-### 2. Enable pause.flag support in training
-
-```bash
-python scripts/distill_minillm.py --output_dir ./distilled-minillm --watchdog
+./watchdog ../../distilled-mlx --interval 60 --config ../../configs/watchdog_rules.json
 ```
 
 ### 3. LaunchAgent (survives reboot)
@@ -75,54 +87,56 @@ launchctl load ~/Library/LaunchAgents/com.caribou.distill-watchdog.plist
     "min_points": 5,
     "lr_scale": 0.8
   },
-  "thermal": {
-    "enabled": false,
-    "pause_if_over": 18000,
-    "metric": "cpu_power_mw"
-  },
-  "validator": { "backup_before_write": true, "max_lr_scale": 0.5 }
+  "divergence": {
+    "window": 3,
+    "threshold": 1.5,
+    "baseline_window": 5,
+    "min_points": 8
+  }
 }
 ```
 
-**Thermal (M1/M2/M3):** Apple Silicon does not expose raw CPU °C via standard APIs. Use:
+### Plateau parameters
 
-| `metric` | `pause_if_over` | Description |
-|----------|-----------------|-------------|
-| `cpu_power_mw` | mW (e.g. 18000 = 18W) | CPU power — high power ≈ hot chip |
-| `thermal_pressure` | 0–100 | Aggregate thermal throttling (if available) |
+| Key | Default | Description |
+|-----|---------|-------------|
+| `window` | 3 | Number of consecutive loss deltas to check |
+| `max_delta` | 0.001 | If all N deltas are below this → plateau |
+| `min_points` | 5 | Minimum loss entries before plateau check starts |
+| `lr_scale` | 0.8 | Suggested LR multiplier written to `watchdog_suggestions.json` |
 
-Requires `sudo powermetrics`. For daemon use, add NOPASSWD:
+### Divergence parameters
 
-```bash
-sudo visudo
-# Add: your_user ALL=(ALL) NOPASSWD: /usr/bin/powermetrics
-```
-
-Override via `--config /path/to/rules.json`.
+| Key | Default | Description |
+|-----|---------|-------------|
+| `window` | 3 | Recent average = mean of last N losses |
+| `threshold` | 1.5 | Pause if recent avg > baseline avg × this |
+| `baseline_window` | 5 | Baseline = mean of first N losses |
+| `min_points` | 8 | Minimum points before divergence check starts |
 
 ## Outputs
 
-- **watchdog_suggestions.json** — Proposed params for next run (e.g. `next_lr_scale`)
-- **pause.flag** — Signals Trainer to save and exit (thermal/emergency)
+- **`watchdog_suggestions.json`** — Proposed params for next run (e.g. `next_lr_scale: 0.8`) written on plateau detection
+- **`pause.flag`** — Signals trainer to save checkpoint and exit cleanly (written on divergence)
 
-## Adding thermal (M3)
+## Thermal Protection
 
-Thermal monitoring uses `powermetrics` (CPU power or thermal pressure as proxies for temperature). Implemented in `check_thermal()`.
+Thermal monitoring (CPU/GPU/SoC temperature) is handled by the **separate** `thermal_agent.py`, not this watchdog. The two cooperate via `pause.flag` metadata:
 
-1. Enable in config: `"thermal": { "enabled": true, "pause_if_over": 18000, "metric": "cpu_power_mw" }`
-2. Allow powermetrics without password prompt (for LaunchAgent):
+```bash
+# Run thermal agent alongside watchdog for complete protection
+python scripts/thermal_agent.py --watch . --threshold 85   # terminal 1
+python scripts/training_watchdog.py ./distilled-mlx        # terminal 2
+python scripts/distill_mlx.py --open --watchdog            # terminal 3
+```
 
-   ```bash
-   sudo visudo
-   # Add line: your_username ALL=(ALL) NOPASSWD: /usr/bin/powermetrics
-   ```
+See [THERMAL_AGENT.md](../THERMAL_AGENT.md) for thermal agent setup.
 
-3. Adjust `pause_if_over`: 18000 mW (18W) is a reasonable default for M3 Max under heavy distillation.
+## Integration with Other Backends
 
-## Hybrid with Unsloth / LLaMA-Factory
+The watchdog reads `trainer_state.json` (standard HuggingFace Trainer format). This is written automatically by:
+- `distill_mlx.py` — writes after each step
+- `distill_minillm.py` — written by HF Trainer
+- `distill_unsloth.py` — written by HF Trainer
 
-For faster training + watchdog:
-
-1. Switch distillation to Unsloth or LLaMA-Factory (2–5× faster on M3)
-2. Point watchdog at their output dir (or adapt parser for their log format)
-3. Same LaunchAgent + rules apply
+Point the watchdog at whatever `--output_dir` you pass to the training script.

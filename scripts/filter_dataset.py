@@ -421,8 +421,8 @@ def main():
             deduped = deduped[: args.target]
             _teacher_ranked = True
             logger.info("Teacher-ranked: kept top-%d by NLL", args.target)
-        except Exception as e:
-            logger.warning("Teacher scoring failed (non-fatal): %s", e)
+        except Exception:
+            raise
 
     # ── Optional: top-N by heuristic quality score ────────────────────────────
     if not _teacher_ranked and args.target and len(deduped) > args.target:

@@ -39,8 +39,11 @@ def load_dataset_split(dataset_path, max_samples=None, cache_dir=None, offline=F
             if max_samples and len(ds) > max_samples:
                 ds = ds.select(range(max_samples))
             return ds
-        except Exception:
-            pass
+        except Exception as e:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "HF offline cache load failed (%s), falling back to disk cache", e
+            )
         # Fall back to explicit disk cache (created by cache_datasets.py / airgap.py prepare)
         cache_candidates = [
             Path("datasets_cache") / dataset_path.replace("/", "___"),

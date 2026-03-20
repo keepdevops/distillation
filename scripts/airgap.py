@@ -109,7 +109,7 @@ def _convert_mlx(hf_path: str, mlx_path: Path, q_bits: int = 4):
     log.info("  Converting to MLX (q%d): %s -> %s", q_bits, hf_path, mlx_path)
     result = subprocess.run(cmd, capture_output=False)
     if result.returncode != 0:
-        log.warning("  MLX conversion failed for %s (non-fatal)", hf_path)
+        raise RuntimeError(f"MLX conversion failed for {hf_path} (exit {result.returncode})")
     else:
         log.info("  MLX conversion done: %s", mlx_path)
 

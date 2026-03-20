@@ -24,16 +24,19 @@
 16. [Script Reference](#16-script-reference)
 17. [Troubleshooting](#17-troubleshooting)
 
+**Architecture & Phases:** [ARCHITECTURE.md](../ARCHITECTURE.md) — in-depth explanation of all pipeline stages, optimization phases, and quality gate phases.
+
 ---
 
 ## 1. What This Toolkit Does
 
 **Knowledge distillation** compresses a large "teacher" model into a smaller "student" model that retains most of the teacher's quality. This toolkit:
 
-- Trains the student to mimic the teacher's output distribution (KL divergence loss)
-- Applies **LoRA** adapters so only a fraction of parameters are updated
+- Trains the student to mimic the teacher's **output probability distribution** (KL divergence loss) rather than just hard labels — the teacher's logits encode richer signal about semantic relationships between tokens
+- Applies **LoRA** adapters so only 1–5% of parameters are updated, making training feasible on consumer hardware
+- Pre-computes teacher logits once before training, freeing the GPU for student training and dramatically reducing peak memory
 - Runs entirely on your Mac — no cloud, no GPU server required
-- Exports the result to **GGUF** (llama.cpp), **CoreML** (.mlpackage, Apple Neural Engine), or **MLX** quantized weights
+- Exports to **GGUF** (llama.cpp), **CoreML** (.mlpackage, Apple Neural Engine), and **MLX** quantized weights from a single distilled model
 
 **Three training backends:**
 
@@ -47,6 +50,20 @@
 - Teacher: `Qwen/Qwen2-1.5B-Instruct`
 - Student: `Qwen/Qwen2-0.5B-Instruct`
 - Dataset: `tatsu-lab/alpaca`
+
+**Pipeline overview:**
+
+The full pipeline has five stages plus an agentic feedback loop:
+
+```
+Stage 0 (Optional): Preparation — cache models, generate synthetic data, SFT warmup
+Stage 1: Distillation — teacher logit precompute → student training via LoRA + KD loss
+Stage 2: Evaluation — perplexity, quality gates (diversity/refusal/judge), benchmarks
+Stage 3: Export — GGUF (llama.cpp), CoreML (ANE), MLX quantized weights
+Stage 4: Agentic Loop — log metrics → diagnose → propose next hyperparameters
+```
+
+For a deep dive into each stage and the optimization phases (Phase 1: 40–50% speedup; Phase 1.5: +15–20%), see [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ---
 
@@ -302,16 +319,22 @@ After distillation, convert the student model for deployment.
 
 ### 8.1 GGUF (llama.cpp, llama-server)
 
-Requires llama.cpp in `../llama.cpp/` or `./llama.cpp/`.
+llama.cpp is pre-installed at `/Users/Shared/llama`. The agent handles conversion automatically with `--export gguf`.
 
+**Automatic (recommended):**
 ```bash
-python llama.cpp/convert_hf_to_gguf.py ./distilled-minillm \
-  --outfile ./distilled-minillm/student-f16.gguf \
+python scripts/run_distillation_agent.py --open --backend mlx --export gguf
+```
+
+**Manual:**
+```bash
+python /Users/Shared/llama/convert_hf_to_gguf.py ./distilled-mlx \
+  --outfile /Users/Shared/llama/models/student-f16.gguf \
   --outtype f16
 
 # Serve it:
-./llama.cpp/build/bin/llama-server \
-  -m ./distilled-minillm/student-f16.gguf
+/Users/Shared/llama/llama-server \
+  -m /Users/Shared/llama/models/student-f16.gguf --port 8080
 ```
 
 GGUF quantization types (smaller = faster inference, slightly lower quality):
@@ -628,13 +651,13 @@ See [WATCHDOG.md](WATCHDOG.md) for full LaunchAgent setup.
 
 ## 13. Starting All Services at Once
 
-`start.sh` launches the watchdog + dashboard (+ optional thermal monitor) in one command.
+`start.sh` launches all services in a **tmux session** named `distill` with `caffeinate` to prevent sleep during long runs. Each service gets its own named window so you can inspect live output at any time.
 
 ```bash
-# Watchdog + dashboard only
+# Watchdog + dashboard only (most common)
 ./scripts/start.sh
 
-# With thermal monitor
+# With thermal monitor (window: thermal)
 ./scripts/start.sh --monitor
 
 # Eval UI instead of dashboard
@@ -647,19 +670,28 @@ See [WATCHDOG.md](WATCHDOG.md) for full LaunchAgent setup.
 ./scripts/start.sh --backend=mlx --export=all
 ```
 
-PIDs are saved to `.distill.pids`. Stop everything:
+Attach to the session to see live output:
 
 ```bash
-./scripts/stop.sh   # or: kill $(cat .distill.pids | awk '{print $1}')
+tmux attach -t distill          # main session (watchdog/dashboard/thermal)
+tmux attach -t distill-phase2  # if run_phase2.sh was launched separately
 ```
 
-Services started:
+Stop everything (kills tmux sessions + stray processes):
 
-| Service | Log | URL |
-|---------|-----|-----|
-| `training_watchdog.py` | `watchdog.log` | — |
-| `dashboard.py` | `dashboard.log` | http://127.0.0.1:7860 |
-| `monitor_cpu_gpu_temp.py` | `thermal.log` | — (optional) |
+```bash
+./scripts/stop.sh
+```
+
+tmux windows in the `distill` session:
+
+| Window | Service | Log | URL |
+|--------|---------|-----|-----|
+| `watchdog` | `training_watchdog.py` | `watchdog.log` | — |
+| `dashboard` | `dashboard.py` / `eval_gradio.py` | `dashboard.log` | http://127.0.0.1:7860 |
+| `thermal` | `monitor_cpu_gpu_temp.py` | `thermal.log` | — (optional, `--monitor` only) |
+
+**Note:** `tmux` must be installed (`brew install tmux`). All windows run under `caffeinate -dims` so the Mac stays awake for the full training run.
 
 ---
 
@@ -796,8 +828,8 @@ Example config with both rules:
 | Script | Output | When to use |
 |--------|--------|-------------|
 | `scripts/export_coreml.py` | `.mlpackage` | iOS/macOS apps, Apple Neural Engine |
-| `scripts/export_student_gguf.sh` | `.gguf` | Wrapper for llama.cpp conversion |
-| `llama.cpp/convert_hf_to_gguf.py` | `.gguf` | llama-server, cross-platform inference |
+| `scripts/export_student_gguf.sh` | `.gguf` | Wrapper for llama.cpp conversion (auto-detects `/Users/Shared/llama`); auto-launches in tmux session `distill-export` |
+| `/Users/Shared/llama/convert_hf_to_gguf.py` | `.gguf` | llama-server, cross-platform inference |
 | `mlx_lm.convert` (built-in) | `mlx_q4/` dir | MLX inference, smallest on Apple Silicon |
 
 ### Orchestration & agents
@@ -832,11 +864,37 @@ Example config with both rules:
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/eval_quality.py` | Quality gates, diversity metrics, per-sample teacher PPL, LLM-as-judge |
+| `scripts/eval_quality.py` | Quality gates (3 phases): batch gen, refusal detection, length filtering, category balance, embedding diversity, LLM-as-judge |
 | `scripts/early_stopping_callback.py` | Stop training early if loss diverges from baseline (HF Trainer callback) |
-| `scripts/run_eval.py` | Validation loss evaluation |
-| `scripts/run_benchmarks.py` | Benchmark suite |
-| `scripts/experiment_log.py` | Experiment tracking |
+| `scripts/run_eval.py` | Validation perplexity evaluation + teacher comparison |
+| `scripts/run_benchmarks.py` | WikiText-2 benchmark (catastrophic forgetting detection) |
+| `scripts/experiment_log.py` | Agentic memory: log runs, propose next hyperparams, diagnose failures |
+
+**Quality gates phases** (run via `eval_quality.py`):
+
+| Phase | What it evaluates | Key flags |
+|-------|-------------------|-----------|
+| QG Phase 1 (Critical) | Batch generation (8× faster), refusal detection, length filtering, pass rate | Default |
+| QG Phase 2 (Quality) | Category balance, teacher PPL on student outputs, embedding diversity | `--judge-teacher-ppl` |
+| QG Phase 3 (Optimization) | MLX backend, UMAP visualization, volume guidance | `--backend mlx` |
+
+Quick eval commands:
+
+```bash
+# Fast check (10 samples, ~5 seconds)
+python scripts/eval_quality.py ./distilled-mlx --n_samples 10 --offline
+
+# Standard production eval (50 samples + judge, ~60 seconds)
+python scripts/eval_quality.py ./distilled-mlx --judge --n_samples 50 --offline
+
+# Full eval (all phases, MLX backend, ~2 minutes)
+python scripts/eval_quality.py ./distilled-mlx \
+    --judge --judge-teacher-ppl \
+    --n_samples 100 --batch_size 8 \
+    --backend mlx --offline
+```
+
+See [PRODUCTION_QUALITY_GATES.md](../PRODUCTION_QUALITY_GATES.md) for full quality gates documentation.
 
 ### Data & offline support
 
@@ -852,8 +910,8 @@ Example config with both rules:
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/start.sh` | Launch all services in background |
-| `scripts/stop.sh` | Stop all background services |
+| `scripts/start.sh` | Launch all services in a tmux session (`distill`) with caffeinate |
+| `scripts/stop.sh` | Stop all services and kill distill tmux sessions |
 
 ---
 

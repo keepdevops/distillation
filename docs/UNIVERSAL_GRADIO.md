@@ -432,4 +432,4 @@ The universal Gradio UI integrates seamlessly with the distillation pipeline:
 For issues or questions:
 1. Check this guide
 2. See main [USER_MANUAL.md](USER_MANUAL.md)
-3. Report bugs at [GitHub Issues](https://github.com/anthropics/claude-code/issues)
+3. See [ARCHITECTURE.md](../ARCHITECTURE.md) for pipeline phase details

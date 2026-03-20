@@ -13,6 +13,7 @@ Usage:
     python scripts/run_benchmarks.py ./distilled-minillm --baseline_dir ./previous-run
     python scripts/run_benchmarks.py ./distilled-minillm --n_sequences 100 --offline
 """
+from __future__ import annotations
 
 import argparse
 import json

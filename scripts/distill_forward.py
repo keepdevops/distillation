@@ -6,6 +6,7 @@ Bare-metal, air-gapped. Works with BERT/DistilBERT etc.
 
 import argparse
 import os
+import subprocess
 
 import torch
 import torch.nn.functional as F
@@ -140,4 +141,5 @@ def main():
 
 
 if __name__ == "__main__":
+    subprocess.Popen(['caffeinate', '-i', 'sleep', '3600'])
     main()

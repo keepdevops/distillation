@@ -12,6 +12,9 @@ Usage:
   python scripts/run_distillation_agent.py --backend unsloth --export coreml --open
   python scripts/run_distillation_agent.py --config configs/agent_config.json
 """
+from __future__ import annotations
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -37,6 +40,7 @@ def run_cmd(cmd: list[str], cwd: Path, env: dict | None = None) -> None:
     """Run command with live stdout streaming; raise on non-zero exit."""
     LOG.info("Running: %s", " ".join(cmd))
     env = env or os.environ.copy()
+    env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     proc = subprocess.Popen(
         cmd, cwd=cwd, env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -191,6 +195,10 @@ def export_gguf(output_dir: Path, project_root: Path, outtype: str) -> None:
     If output_dir contains MLX weights (.npz) instead of a HF model, the
     LoRA adapters are merged and a temporary HF-compatible directory is
     created first, then passed to convert_hf_to_gguf.py.
+
+    After the initial conversion, if outtype is a float format (f16/bf16/f32),
+    runs llama-quantize to also produce a Q4_K_M GGUF for deployment.
+    Q4_K_M is ~4x smaller than f16 with negligible quality loss on small models.
     """
     llama_cpp = find_llama_cpp(project_root)
     if not llama_cpp:
@@ -204,8 +212,8 @@ def export_gguf(output_dir: Path, project_root: Path, outtype: str) -> None:
 
     convert_script = llama_cpp / "convert_hf_to_gguf.py"
     out_name = output_dir.name + f"-{outtype}.gguf"
-    # Save GGUF alongside other models in /Users/Shared/llama/models
     gguf_dir = Path("/Users/Shared/llama/models")
+    gguf_dir.mkdir(parents=True, exist_ok=True)
     out_file = gguf_dir / out_name
     run_cmd(
         [
@@ -220,7 +228,31 @@ def export_gguf(output_dir: Path, project_root: Path, outtype: str) -> None:
         project_root,
     )
     LOG.info("GGUF saved: %s", out_file)
-    LOG.info("Serve with: /Users/Shared/llama/llama-server -m %s", out_file)
+
+    # Run llama-quantize to produce Q4_K_M from float GGUFs.
+    # Q4_K_M requires a separate pass — convert_hf_to_gguf.py only outputs float/q8_0.
+    if outtype in ("f16", "bf16", "f32"):
+        quantize_bin = Path("/Users/Shared/llama/llama-quantize")
+        if not quantize_bin.exists():
+            quantize_bin = llama_cpp / "llama-quantize"
+        if quantize_bin.exists():
+            q4_file = gguf_dir / (output_dir.name + "-Q4_K_M.gguf")
+            LOG.info("Running llama-quantize → Q4_K_M: %s", q4_file)
+            run_cmd(
+                [str(quantize_bin), str(out_file), str(q4_file), "Q4_K_M"],
+                project_root,
+            )
+            LOG.info("Q4_K_M saved: %s (deploy this one)", q4_file)
+            LOG.info("Serve with: /Users/Shared/llama/llama-server -m %s", q4_file)
+        else:
+            LOG.warning(
+                "llama-quantize not found at %s — skipping Q4_K_M quantization. "
+                "Build llama.cpp (make llama-quantize) or install a llama.cpp release.",
+                quantize_bin,
+            )
+            LOG.info("Serve with: /Users/Shared/llama/llama-server -m %s", out_file)
+    else:
+        LOG.info("Serve with: /Users/Shared/llama/llama-server -m %s", out_file)
 
 
 def export_coreml(output_dir: Path, project_root: Path, quantize: str | None) -> None:
@@ -232,6 +264,7 @@ def export_coreml(output_dir: Path, project_root: Path, quantize: str | None) ->
         str(output_dir),
         "--output_dir",
         str(output_dir),
+        "--compute_units", "CPU_AND_NE",  # ANE is faster than GPU for transformer inference on M3
     ]
     if quantize and quantize in ("int4", "int8", "float16"):
         cmd += ["--quantize", quantize]
@@ -252,12 +285,10 @@ def export_mlx_quant(output_dir: Path, project_root: Path, q_bits: int) -> None:
             LOG.info("Removing existing quantized dir: %s", quant_dir)
             shutil.rmtree(quant_dir)
         LOG.info("MLX quantization → %s", quant_dir)
-        mlx_convert(str(output_dir), quantize=True, q_bits=q_bits, mlx_path=str(quant_dir))
+        mlx_convert(str(output_dir), quantize=True, q_bits=q_bits, q_group_size=64, mlx_path=str(quant_dir))
         LOG.info("MLX quantized model saved: %s", quant_dir)
     except ImportError:
         LOG.warning("mlx_lm not installed; skipping MLX quantization export")
-    except Exception as e:
-        LOG.warning("MLX quantization failed (non-fatal): %s", e)
 
 
 def _build_distill_cmd(args, output_dir: Path,
@@ -274,6 +305,12 @@ def _build_distill_cmd(args, output_dir: Path,
             "--minillm_temp", str(args.temperature),
             "--lora_r", str(args.lora_r),
             "--seed", str(trial_seed),
+            "--batch_size", str(getattr(args, "batch_size", 8)),
+            "--grad_acc", str(getattr(args, "grad_acc", 8)),
+            "--learning_rate", str(getattr(args, "learning_rate", 2e-5)),
+            "--eval_steps", str(getattr(args, "eval_steps", 20)),
+            "--num_generations", str(getattr(args, "num_generations", 2)),
+            "--max_new_tokens", str(getattr(args, "max_new_tokens", 128)),
         ]
         if args.open:
             cmd.append("--open")
@@ -420,6 +457,12 @@ def main():
     ap.add_argument("--lora_r", type=int, default=16,
                     help="LoRA rank (default: 16). Higher ranks increase memory; "
                          "64 risks OOM on MLX with full-vocab logit tensors.")
+    ap.add_argument("--eval_steps", type=int, default=20,
+                    help="Eval frequency in gradient steps for pytorch backend (default: 20)")
+    ap.add_argument("--num_generations", type=int, default=2,
+                    help="GRPO completions per prompt for pytorch backend (default: 2)")
+    ap.add_argument("--max_new_tokens", type=int, default=128,
+                    help="Max generation length for pytorch backend (default: 128)")
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--skip_eval", action="store_true",
                     help="Skip post-distillation eval steps (run_eval + eval_quality)")
@@ -520,33 +563,28 @@ def main():
     if args.memory_check:
         def _estimate_gb(model_id: str, cache_dir) -> float:
             """Rough estimate: 2 bytes/param (bf16) × 4× for training overhead."""
-            try:
-                import json as _json
-                from pathlib import Path as _Path
-                from huggingface_hub import cached_assets_path  # noqa: F401
-                # Try to read config.json from cache
-                import transformers
-                cfg_path = None
-                for search in [
-                    _Path(cache_dir or "") / "models--" / model_id.replace("/", "--"),
-                    _Path.home() / ".cache" / "huggingface" / "hub" /
-                    ("models--" + model_id.replace("/", "--")),
-                ]:
-                    for cfg in search.rglob("config.json"):
-                        cfg_path = cfg
-                        break
-                    if cfg_path:
-                        break
-                if not cfg_path:
-                    return 0.0
-                with open(cfg_path) as f:
-                    cfg = _json.load(f)
-                params = cfg.get("num_parameters") or (
-                    cfg.get("hidden_size", 0) * cfg.get("num_hidden_layers", 0) * 12
-                )
-                return params * 2 * 4 / 1e9  # bf16 × 4× training overhead
-            except Exception:
+            import json as _json
+            from pathlib import Path as _Path
+            # Try to read config.json from cache
+            cfg_path = None
+            for search in [
+                _Path(cache_dir or "") / "models--" / model_id.replace("/", "--"),
+                _Path.home() / ".cache" / "huggingface" / "hub" /
+                ("models--" + model_id.replace("/", "--")),
+            ]:
+                for cfg in search.rglob("config.json"):
+                    cfg_path = cfg
+                    break
+                if cfg_path:
+                    break
+            if not cfg_path:
                 return 0.0
+            with open(cfg_path) as f:
+                cfg = _json.load(f)
+            params = cfg.get("num_parameters") or (
+                cfg.get("hidden_size", 0) * cfg.get("num_hidden_layers", 0) * 12
+            )
+            return params * 2 * 4 / 1e9  # bf16 × 4× training overhead
 
         cache_dir = os.environ.get("HF_HOME") or args.__dict__.get("cache_dir")
         teacher_id = "Qwen/Qwen2-1.5B-Instruct" if args.open else "meta-llama/Llama-3.2-8B-Instruct"
@@ -606,13 +644,10 @@ def main():
                 filter_cmd += ["--teacher", "Qwen/Qwen2-1.5B-Instruct"]
         if args.offline:
             filter_cmd.append("--offline")
-        try:
-            run_cmd(filter_cmd, project_root)
-            _dataset_override = str(_filter_out)
-            _steps_completed.append("filter")
-            LOG.info("Filtered dataset ready: %s", _dataset_override)
-        except RuntimeError as e:
-            LOG.warning("Dataset filtering failed (non-fatal, using raw dataset): %s", e)
+        run_cmd(filter_cmd, project_root)
+        _dataset_override = str(_filter_out)
+        _steps_completed.append("filter")
+        LOG.info("Filtered dataset ready: %s", _dataset_override)
 
     # ── Step 0c: Synthetic data generation ───────────────────────────────────────
     if args.synthetic_data:
@@ -626,13 +661,10 @@ def main():
             synth_cmd.append("--open")
         if args.offline:
             synth_cmd.append("--offline")
-        try:
-            run_cmd(synth_cmd, project_root)
-            _dataset_override = str(output_dir / "synthetic_data")
-            _steps_completed.append("synthetic_data")
-            LOG.info("Synthetic dataset ready: %s", _dataset_override)
-        except RuntimeError as e:
-            LOG.warning("Synthetic data generation failed (non-fatal): %s", e)
+        run_cmd(synth_cmd, project_root)
+        _dataset_override = str(output_dir / "synthetic_data")
+        _steps_completed.append("synthetic_data")
+        LOG.info("Synthetic dataset ready: %s", _dataset_override)
 
     # ── Step 0c: SFT curriculum warmup (PyTorch backend only) ────────────────────
     _sft_checkpoint: str | None = None
@@ -659,13 +691,10 @@ def main():
                 sft_cmd.append("--watchdog")
             if _dataset_override:
                 sft_cmd += ["--dataset", _dataset_override]
-            try:
-                run_cmd(sft_cmd, project_root)
-                _sft_checkpoint = str(output_dir / "sft_checkpoint")
-                _steps_completed.append("sft_warmup")
-                LOG.info("SFT checkpoint ready: %s", _sft_checkpoint)
-            except RuntimeError as e:
-                LOG.warning("SFT warmup failed (non-fatal, continuing without curriculum): %s", e)
+            run_cmd(sft_cmd, project_root)
+            _sft_checkpoint = str(output_dir / "sft_checkpoint")
+            _steps_completed.append("sft_warmup")
+            LOG.info("SFT checkpoint ready: %s", _sft_checkpoint)
 
     # ── 1. Distillation (single trial or multi-trial loop) ───────────────────────
     if args.n_trials > 1:
@@ -766,17 +795,11 @@ def main():
 
     if "gguf" in export_targets:
         LOG.info("Exporting GGUF...")
-        try:
-            export_gguf(output_dir, project_root, args.outtype)
-        except RuntimeError as e:
-            LOG.warning("GGUF export failed (non-fatal): %s", e)
+        export_gguf(output_dir, project_root, args.outtype)
 
     if "coreml" in export_targets:
         LOG.info("Exporting CoreML...")
-        try:
-            export_coreml(output_dir, project_root, args.coreml_quantize)
-        except RuntimeError as e:
-            LOG.warning("CoreML export failed (non-fatal): %s", e)
+        export_coreml(output_dir, project_root, args.coreml_quantize)
 
     if "mlx" in export_targets and args.backend != "mlx":
         # MLX quant from a non-MLX training run (e.g., pytorch → mlx quant)
@@ -800,10 +823,7 @@ def main():
         if mlx_quant_dir.exists():
             eval_cmd += ["--quant_dir", str(mlx_quant_dir)]
             LOG.info("Quant dir found: %s", mlx_quant_dir)
-        try:
-            run_cmd(eval_cmd, project_root)
-        except RuntimeError as e:
-            LOG.warning("Perplexity eval failed (non-fatal): %s", e)
+        run_cmd(eval_cmd, project_root)
 
     # ── 4. Quality eval (diversity + LLM-as-judge) ───────────────────────────────
     # NOTE: Quality eval only runs on winner (output_dir points to best trial after line 490)
@@ -820,11 +840,8 @@ def main():
             quality_cmd += ["--judge"]
             if args.open:
                 quality_cmd += ["--teacher", "Qwen/Qwen2-1.5B-Instruct"]
-        try:
-            run_cmd(quality_cmd, project_root)
-            _steps_completed.append("quality_eval")
-        except RuntimeError as e:
-            LOG.warning("Quality eval failed (non-fatal): %s", e)
+        run_cmd(quality_cmd, project_root)
+        _steps_completed.append("quality_eval")
 
     # ── 5. WikiText-2 benchmark ───────────────────────────────────────────────────
     if args.benchmarks:
@@ -836,69 +853,60 @@ def main():
             bench_cmd += ["--offline"]
         if args.baseline_dir:
             bench_cmd += ["--baseline_dir", args.baseline_dir]
-        try:
-            run_cmd(bench_cmd, project_root)
-            _steps_completed.append("benchmarks")
-        except RuntimeError as e:
-            LOG.warning("Benchmark failed (non-fatal): %s", e)
+        run_cmd(bench_cmd, project_root)
+        _steps_completed.append("benchmarks")
 
     # ── 5b. Diagnose (single-trial only; multi-trial diagnoses winner above) ──────
     if args.n_trials <= 1 and not args.skip_eval:
-        try:
-            _final_metrics = _collect_metrics_fn(str(output_dir))
-            _diag = _exp_log.diagnose(_final_metrics)
-            for _d in _diag:
-                LOG.info("Diagnosis: %s", _d)
-        except Exception as e:
-            LOG.warning("Diagnosis failed (non-fatal): %s", e)
+        _final_metrics = _collect_metrics_fn(str(output_dir))
+        _diag = _exp_log.diagnose(_final_metrics)
+        for _d in _diag:
+            LOG.info("Diagnosis: %s", _d)
 
     # ── 6. Log experiment ─────────────────────────────────────────────────────────
     if args.log_experiment:
-        try:
-            from experiment_log import build_entry, make_run_id
-            import torch as _torch
+        from experiment_log import build_entry, make_run_id
+        import torch as _torch
 
-            hardware = (
-                "mps" if _torch.backends.mps.is_available() else
-                "cuda" if _torch.cuda.is_available() else "cpu"
-            )
-            teacher_id = ("Qwen/Qwen2-1.5B-Instruct" if args.open
-                          else "meta-llama/Llama-3.2-8B-Instruct")
-            student_id = ("Qwen/Qwen2-0.5B-Instruct" if args.open
-                          else "meta-llama/Llama-3.2-1B-Instruct")
-            run_id = make_run_id(str(output_dir))
-            config = {
-                "backend": args.backend,
-                "teacher": teacher_id,
-                "student": student_id,
-                "dataset": str(_dataset_override or args.dataset),
-                "epochs": args.epochs,
-                "max_samples": args.max_samples,
-                "temperature": args.temperature,
-                "lora_r": args.lora_r,
-                "curriculum": args.curriculum,
-                "sft_epochs": args.sft_epochs if args.curriculum else 0,
-                "synthetic_data": args.synthetic_data,
-                "n_synthetic": args.n_synthetic if args.synthetic_data else 0,
-                "export": args.export,
-                "seed": args.seed,
-                "n_trials": args.n_trials,
-            }
-            metrics = _collect_metrics_fn(str(output_dir))
-            entry = build_entry(
-                run_id=run_id,
-                output_dir=str(output_dir),
-                config=config,
-                metrics=metrics,
-                outcome="success",
-                steps_completed=_steps_completed,
-                start_time=_start_time,
-                hardware=hardware,
-            )
-            _exp_log.append(entry)
-            LOG.info("Experiment logged to %s (run_id: %s)", args.experiment_log, run_id)
-        except Exception as e:
-            LOG.warning("Experiment logging failed (non-fatal): %s", e)
+        hardware = (
+            "mps" if _torch.backends.mps.is_available() else
+            "cuda" if _torch.cuda.is_available() else "cpu"
+        )
+        teacher_id = ("Qwen/Qwen2-1.5B-Instruct" if args.open
+                      else "meta-llama/Llama-3.2-8B-Instruct")
+        student_id = ("Qwen/Qwen2-0.5B-Instruct" if args.open
+                      else "meta-llama/Llama-3.2-1B-Instruct")
+        run_id = make_run_id(str(output_dir))
+        config = {
+            "backend": args.backend,
+            "teacher": teacher_id,
+            "student": student_id,
+            "dataset": str(_dataset_override or args.dataset),
+            "epochs": args.epochs,
+            "max_samples": args.max_samples,
+            "temperature": args.temperature,
+            "lora_r": args.lora_r,
+            "curriculum": args.curriculum,
+            "sft_epochs": args.sft_epochs if args.curriculum else 0,
+            "synthetic_data": args.synthetic_data,
+            "n_synthetic": args.n_synthetic if args.synthetic_data else 0,
+            "export": args.export,
+            "seed": args.seed,
+            "n_trials": args.n_trials,
+        }
+        metrics = _collect_metrics_fn(str(output_dir))
+        entry = build_entry(
+            run_id=run_id,
+            output_dir=str(output_dir),
+            config=config,
+            metrics=metrics,
+            outcome="success",
+            steps_completed=_steps_completed,
+            start_time=_start_time,
+            hardware=hardware,
+        )
+        _exp_log.append(entry)
+        LOG.info("Experiment logged to %s (run_id: %s)", args.experiment_log, run_id)
 
     LOG.info("Agent finished. Output: %s  Steps: %s", output_dir, _steps_completed)
 

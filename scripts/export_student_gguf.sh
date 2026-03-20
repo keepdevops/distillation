@@ -11,6 +11,24 @@
 
 set -e
 
+SESSION="distill-export"
+
+# If not inside tmux, relaunch in a new tmux session with caffeinate
+if [ -z "${TMUX:-}" ]; then
+  if ! command -v tmux &>/dev/null; then
+    echo "Error: tmux not found. Install with: brew install tmux"
+    exit 1
+  fi
+  ARGS="$*"
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  tmux new-session -d -s "$SESSION" -x 220 -y 50
+  tmux send-keys -t "$SESSION" \
+    "caffeinate -dims bash $(realpath "$0") $ARGS; echo '==> Export done. Press Enter to close.'; read" Enter
+  echo "==> Export launched in tmux session '$SESSION'"
+  echo "    Attach with: tmux attach -t $SESSION"
+  exit 0
+fi
+
 STUDENT_DIR="${1:-./distilled-minillm}"
 # llama.cpp: ./llama.cpp (if cloned into project) or ../llama.cpp
 LLAMA_CPP="${2}"

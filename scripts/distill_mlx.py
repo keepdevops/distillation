@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import random
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -549,11 +550,12 @@ def main():
                 mlx_path=str(quant_dir),
             )
             LOG.info("Quantized model saved: %s", quant_dir)
-        except Exception as e:
-            LOG.warning("mlx_lm.convert failed (non-fatal): %s", e)
+        except Exception:
+            raise
 
     LOG.info("MLX distillation complete. Output: %s", output_dir)
 
 
 if __name__ == "__main__":
+    subprocess.Popen(['caffeinate', '-i', 'sleep', '3600'])
     main()

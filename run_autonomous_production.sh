@@ -1,9 +1,32 @@
 #!/bin/bash
 set -e
 
+SESSION="distill-prod"
+
+# ── tmux: relaunch inside a named session if not already inside one ──────────
+if [ -z "$TMUX" ]; then
+    if ! command -v tmux &>/dev/null; then
+        echo "WARNING: tmux not found. Install with: brew install tmux"
+        echo "Continuing without tmux (session will not persist if terminal closes)."
+    else
+        if tmux has-session -t "$SESSION" 2>/dev/null; then
+            echo "Session '$SESSION' already exists."
+            echo "Attach with:  tmux attach -t $SESSION"
+            echo "Kill old run: tmux kill-session -t $SESSION  then re-run this script."
+            exit 1
+        fi
+        echo "Launching inside tmux session '$SESSION'..."
+        echo "Detach any time with Ctrl-B D  •  Re-attach: tmux attach -t $SESSION"
+        exec tmux new-session -s "$SESSION" "$0" "$@"
+    fi
+fi
+
 echo "════════════════════════════════════════════════════════════════════"
 echo "  Autonomous Production Distillation"
 echo "════════════════════════════════════════════════════════════════════"
+echo ""
+echo "Session:  ${TMUX:+tmux '$SESSION'}${TMUX:-no tmux}"
+echo "Caffeinate: preventing system sleep (AC power)"
 echo ""
 echo "Configuration:"
 echo "  • Trials: 5 (autonomous hyperparameter search)"
@@ -35,13 +58,19 @@ echo "Monitoring:"
 echo "  • Watchdog: Plateau detection (training progress)"
 echo "  • Thermal agent: Optional system-wide protection (see THERMAL_AGENT.md)"
 echo "  • Live logs: tail -f distilled-minillm/logs/*.log"
+echo "  • tmux windows: Ctrl-B D to detach, tmux attach -t $SESSION to re-attach"
 echo ""
 echo "════════════════════════════════════════════════════════════════════"
 echo ""
 echo "Starting in 3 seconds... (Ctrl+C to cancel)"
 sleep 3
 
-python scripts/run_distillation_agent.py \
+# ── caffeinate: prevent idle sleep (battery-safe) for up to 1 hour ──────────
+caffeinate -i sleep 360000 &
+
+# ── caffeinate: keep Mac awake on AC power for the duration of the run ───────
+caffeinate -s \
+pixi run python scripts/run_distillation_agent.py \
     --open \
     --offline \
     --n_trials 5 \

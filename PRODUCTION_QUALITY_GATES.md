@@ -2,9 +2,11 @@
 
 Complete implementation of production-ready quality gates for autonomous agentic knowledge distillation.
 
+> **See also:** [ARCHITECTURE.md](ARCHITECTURE.md) → Stage 2: Evaluation section for in-depth explanations of each metric, what it measures, and why it matters.
+
 ## Summary of Enhancements
 
-All 3 phases implemented (12 major features):
+All 3 quality gate phases implemented (12 major features):
 
 ### Phase 1: Critical Fixes ✅
 

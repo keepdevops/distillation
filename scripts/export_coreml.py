@@ -62,9 +62,9 @@ def parse_args():
                    help="Post-training quantization type")
     p.add_argument("--seq_len", type=int, default=128,
                    help="Sequence length for tracing (shorter = faster, longer = more flexible)")
-    p.add_argument("--compute_units", type=str, default="ALL",
+    p.add_argument("--compute_units", type=str, default="CPU_AND_NE",
                    choices=["ALL", "CPU_ONLY", "CPU_AND_GPU", "CPU_AND_NE"],
-                   help="CoreML compute units (ALL = CPU+GPU+ANE)")
+                   help="CoreML compute units (default: CPU_AND_NE — ANE is faster than GPU for transformer inference on M3)")
     p.add_argument("--offline", action="store_true", help="Air-gapped: local cache only")
     return p.parse_args()
 

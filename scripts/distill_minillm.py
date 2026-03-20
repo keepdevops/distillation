@@ -5,7 +5,9 @@ Bare-metal, air-gapped compatible. Optimized for Apple M3 (MPS).
 """
 
 import argparse
+import logging
 import os
+import subprocess
 import sys
 import warnings
 from pathlib import Path
@@ -30,13 +32,49 @@ warnings.filterwarnings(
     "ignore",
     message="Passing `generation_config` together with generation-related arguments",
 )
+# The same message is also emitted via logging (not warnings), so filter that too.
+logging.getLogger("transformers.generation.utils").setLevel(logging.ERROR)
 # Silence TRLExperimentalWarning for the minillm import path
 os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
 
 
+LOG = logging.getLogger(__name__)
+
 # Open models (no HuggingFace login / Meta license)
 OPEN_TEACHER = "Qwen/Qwen2-1.5B-Instruct"
 OPEN_STUDENT = "Qwen/Qwen2-0.5B-Instruct"
+
+# Threshold for "likely clipped" completions.
+# Calibrated for 128-token max: 128 × ~3.5 chars/tok ≈ 448 chars; 430 gives a
+# small buffer to reliably catch outputs clipped at the hard limit.
+# Update this constant if you change --max_new_tokens significantly.
+_MAX_NATURAL_CHARS = 430
+
+
+def response_quality_reward(completions: list, **kwargs) -> list:
+    """
+    Discriminative reward for instruction-following quality.
+
+    Provides variance within GRPO completion groups so the advantage signal is
+    non-zero even without an external verifier:
+      -1.0  mode collapse (empty / near-empty response)
+      -0.5  over-generation (completion likely clipped at max_completion_length)
+      +0.5  natural termination with reasonable content
+
+    _MAX_NATURAL_CHARS should be kept slightly below max_new_tokens * ~3.5 chars/tok
+    to catch clipped outputs before the hard limit.
+    """
+    rewards = []
+    for completion in completions:
+        text = completion.strip()
+        n = len(text)
+        if n < 10:
+            rewards.append(-1.0)   # mode collapse
+        elif n > _MAX_NATURAL_CHARS:
+            rewards.append(-0.5)   # hit max_completion_length, likely clipped
+        else:
+            rewards.append(0.5)    # natural, content-bearing response
+    return rewards
 
 
 def parse_args():
@@ -54,9 +92,10 @@ def parse_args():
     p.add_argument("--use_4bit_teacher", action="store_true")
     p.add_argument("--minillm_temp", type=float, default=1.0, help="KD temperature")
     p.add_argument("--max_samples", type=int, default=2000, help="Max train samples (for quick runs)")
-    p.add_argument("--eval_steps", type=int, default=2, help="Run eval every N steps (default: 2 for speed, use 1 for detailed curves)")
-    p.add_argument("--num_generations", type=int, default=4, help="Generations per prompt for MiniLLM (default: 4, lower = faster)")
-    p.add_argument("--max_new_tokens", type=int, default=256, help="Max tokens to generate (default: 256, lower = faster)")
+    p.add_argument("--eval_steps", type=int, default=20, help="Run eval every N steps (default: 20; lower gives more detail, higher is faster)")
+    p.add_argument("--num_generations", type=int, default=2, help="Generations per prompt for GRPO/MiniLLM (default: 2; 4 gives more advantage variance but is 2x slower)")
+    p.add_argument("--max_new_tokens", type=int, default=128, help="Max tokens to generate (default: 128; update _MAX_NATURAL_CHARS if changed significantly)")
+    p.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate (default: 2e-5)")
     p.add_argument("--eval_split", type=float, default=0.02, help="Eval dataset size as fraction of train (default: 0.02 = 2%%)")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true",
@@ -98,6 +137,7 @@ def main():
         args.student, cache_dir=cache_dir, local_files_only=offline
     )
     tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
 
     # Teacher (optionally quantized)
     quant_config = None
@@ -109,21 +149,30 @@ def main():
             bnb_4bit_use_double_quant=True,
         )
 
-    # Detect Flash Attention 2 support (2-3x speedup)
+    # Determine best available attention implementation
+    # Priority: flash_attention_2 (CUDA) > sdpa (MPS/CPU, PyTorch 2.0+) > eager
     use_flash_attn = False
     try:
         import flash_attn
         use_flash_attn = True
         print("✓ Flash Attention 2 detected, enabling (2-3x speedup)")
     except ImportError:
-        print("Flash Attention 2 not available. Install for 2-3x speedup:")
+        print("Flash Attention 2 not available (CUDA only). Install for 2-3x speedup:")
         print("  pip install flash-attn --no-build-isolation")
+
+    if use_flash_attn:
+        _attn_impl = "flash_attention_2"
+    elif hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+        _attn_impl = "sdpa"  # PyTorch 2.0+ fused SDPA — faster than eager on MPS
+        print(f"✓ Using SDPA attention (fused kernel, faster than eager on MPS)")
+    else:
+        _attn_impl = "eager"
 
     teacher = AutoModelForCausalLM.from_pretrained(
         args.teacher,
         quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2" if use_flash_attn else "eager",
+        attn_implementation=_attn_impl,
         device_map="auto",
         cache_dir=cache_dir,
         local_files_only=offline,
@@ -140,7 +189,7 @@ def main():
     student = AutoModelForCausalLM.from_pretrained(
         args.student,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2" if use_flash_attn else "eager",
+        attn_implementation=_attn_impl,
         device_map="auto",
         cache_dir=cache_dir,
         local_files_only=offline,
@@ -148,9 +197,9 @@ def main():
 
     peft_config = LoraConfig(
         r=args.lora_r,
-        lora_alpha=128,
+        lora_alpha=args.lora_r * 2,  # scale=2.0 regardless of r (was hardcoded 128, broke at r<64)
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_dropout=0.05,
+        lora_dropout=0.0,  # no dropout — faster and no benefit for distillation
         bias="none",
         task_type="CAUSAL_LM",
     )
@@ -191,18 +240,16 @@ def main():
     dataset = dataset.train_test_split(test_size=args.eval_split, seed=42)
 
     # MiniLLM config (TRL)
-    import logging
-    log = logging.getLogger(__name__)
     try:
         from trl import MiniLLMTrainer, MiniLLMConfig
-        log.debug("Using trl.MiniLLMTrainer")
+        LOG.debug("Using trl.MiniLLMTrainer")
     except ImportError as e:
-        log.debug("trl main import failed: %s", e)
+        LOG.debug("trl main import failed: %s", e)
         try:
             from trl.experimental.minillm import MiniLLMTrainer, MiniLLMConfig
-            log.debug("Using trl.experimental.minillm")
+            LOG.debug("Using trl.experimental.minillm")
         except ImportError as e2:
-            log.error("TRL not found: %s; %s", e, e2)
+            LOG.error("TRL not found: %s; %s", e, e2)
             raise ImportError("Install trl: pip install trl") from e2
 
     # MiniLLMConfig = GRPOConfig = TrainingArguments (single args object)
@@ -225,9 +272,9 @@ def main():
         per_device_train_batch_size=batch,
         per_device_eval_batch_size=batch,
         gradient_accumulation_steps=args.grad_acc,
-        learning_rate=2e-5,
+        learning_rate=args.learning_rate,
         bf16=True,
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,  # 36GB M3 Max has plenty of RAM; checkpointing adds ~25% overhead
         optim="adamw_torch_fused",
         logging_steps=10,
         save_steps=500,
@@ -237,12 +284,11 @@ def main():
         max_grad_norm=1.0,
         lr_scheduler_type="cosine",
         warmup_steps=_warmup_steps,
-        dataloader_pin_memory=False,   # MPS does not support pin_memory
-        dataloader_num_workers=4,      # Parallel data loading (5-10% speedup)
-        dataloader_prefetch_factor=2,  # Pre-load 2 batches per worker
+        dataloader_pin_memory=False,  # MPS does not support pin_memory
+        dataloader_num_workers=0,     # on-policy data is generated in-process; workers add fork overhead
         num_generations=num_generations,
         num_generations_eval=num_generations,
-        max_new_tokens=args.max_new_tokens,
+        max_completion_length=args.max_new_tokens,
         rkl_advantage=True,
         length_normalization=True,
         kd_temperature=args.minillm_temp,
@@ -267,6 +313,7 @@ def main():
     trainer = MiniLLMTrainer(
         model=student,
         teacher_model=teacher,
+        reward_funcs=[response_quality_reward],
         args=config,
         train_dataset=dataset["train"],
         eval_dataset=dataset["test"],
@@ -289,4 +336,5 @@ def main():
 
 
 if __name__ == "__main__":
+    subprocess.Popen(['caffeinate', '-i', 'sleep', '3600'])
     main()

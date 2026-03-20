@@ -10,6 +10,24 @@
 
 set -e
 
+SESSION="distill-thermal"
+
+# If not inside tmux, relaunch in a new tmux session with caffeinate
+if [ -z "${TMUX:-}" ]; then
+  if ! command -v tmux &>/dev/null; then
+    echo "Error: tmux not found. Install with: brew install tmux"
+    exit 1
+  fi
+  ARGS="$*"
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  tmux new-session -d -s "$SESSION" -x 220 -y 50
+  tmux send-keys -t "$SESSION" \
+    "caffeinate -dims bash $(realpath "$0") $ARGS" Enter
+  echo "==> Thermal monitor launched in tmux session '$SESSION'"
+  echo "    Attach with: tmux attach -t $SESSION"
+  exit 0
+fi
+
 INTERVAL="${1:-3}"
 LOGFILE="${2:-}"
 INTERVAL_MS=$(( INTERVAL * 1000 ))
@@ -22,7 +40,7 @@ echo "$divider"
 [ -n "$LOGFILE" ] && { echo "$header"; echo "$divider"; } >> "$LOGFILE"
 
 while true; do
-  JSON=$(mactop --headless --format json --count 1 2>/dev/null | \
+  JSON=$(mactop --headless --format json --count 1 | \
          python3 -c "import sys,json; d=json.load(sys.stdin)[0]['soc_metrics']; \
            print(d['cpu_temp'], d['gpu_temp'], d['soc_temp'], \
                  d['cpu_power'], d['gpu_power'], d['total_power'])")

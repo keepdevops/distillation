@@ -118,7 +118,7 @@ Knowledge distillation transfers knowledge from a large "teacher" model to a sma
 | Runtime | Python 3.11 | — |
 | Framework | PyTorch 2.x (MPS) | MLX (Apple-native, faster) |
 | Models | Hugging Face Transformers | — |
-| Distillation | TRL MiniLLMTrainer (reverse KL) | Custom forward KL |
+| Distillation | TRL KDTrainer (reverse KL, MiniLLM) | Custom forward KL |
 | Inference (optional) | LibTorch (C++) / Core ML | ONNX Runtime |
 | UX | Gradio | Streamlit, CLI |
 | Env | Conda / Miniforge | — |
@@ -153,7 +153,7 @@ dependencies:
   - pip
   - pip:
     - bitsandbytes  # 4/8-bit quantization
-    - trl           # MiniLLMTrainer
+    - trl           # KDTrainer (MiniLLM-style reverse KL)
 ```
 
 #### M3-Specific Notes
@@ -233,11 +233,11 @@ Gradio runs on `127.0.0.1` only (no public share).
 ### 5.2 Target M3 (Air-Gapped)
 
 1. Install Miniforge offline
-2. `conda unpack distill-offline.tar.gz -d ~/envs/distill-offline`
-3. `source ~/envs/distill-offline/bin/activate`
+2. `mkdir -p ~/envs/distill-offline && tar -xzf distill-offline.tar.gz -C ~/envs/distill-offline`
+3. `source ~/envs/distill-offline/bin/activate && conda-unpack`
 4. `export HF_HOME=/path/to/hf_cache`
 5. `export HF_DATASETS_CACHE=/path/to/ds_cache`
-6. Run `python scripts/distill_minillm.py ...`
+6. Run `python scripts/run_distillation_agent.py --open --offline --backend mlx --export gguf`
 
 ---
 

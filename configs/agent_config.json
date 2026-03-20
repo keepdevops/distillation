@@ -8,11 +8,15 @@
   "outtype": "f16",
   "q_bits": 4,
   "coreml_quantize": null,
+  "dataset": "yahma/alpaca-cleaned",
   "epochs": 2,
   "max_samples": 2000,
+  "learning_rate": 2e-5,
   "temperature": 1.0,
-  "lora_r": 64,
-  "eval_steps": 2,
+  "lora_r": 16,
+  "eval_steps": 20,
+  "num_generations": 2,
+  "max_new_tokens": 128,
   "batch_size": 8,
   "grad_acc": 8
 }

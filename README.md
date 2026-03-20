@@ -9,6 +9,7 @@
 A bare-metal, **air-gapped** knowledge distillation pipeline for Apple M3 (ARM64). Supports MiniLLM-style reverse KL, vanilla forward KL, MLX training (2–5× faster), CoreML export, and optional C++ inference. No Docker required; Conda for reproducibility.
 
 **→ [Full User Manual](docs/USER_MANUAL.md)**
+**→ [Pipeline Architecture & Phases](ARCHITECTURE.md)**
 
 ---
 
@@ -24,7 +25,43 @@ A bare-metal, **air-gapped** knowledge distillation pipeline for Apple M3 (ARM64
 - **Multi-user** — Shared model storage at `/Users/Shared/models` for all profiles
 - **Thermal protection** — system-wide autonomous thermal agent monitors all jobs, auto-pause/resume
 - **Training watchdog** — plateau detection, learning rate adjustment, LaunchAgent-ready
+- **Agentic hyperparameter search** — hill-climbing over multi-trial runs, self-improving via experiment history
+- **Production quality gates** — batch generation, refusal detection, embedding diversity, LLM-as-judge
 - **Optional C++** — LibTorch + C++ watchdog for no-Python deployments
+
+---
+
+## Pipeline Phases
+
+The system is organized around two sets of phases:
+
+### Pipeline Stages (run every distillation)
+
+| Stage | Name | Key scripts |
+|-------|------|-------------|
+| 0 | Preparation | `cache_models.py`, `generate_synthetic_data.py`, `distill_sft.py` |
+| 1 | Distillation Core | `distill_mlx.py`, `distill_minillm.py`, `distill_unsloth.py` |
+| 2 | Evaluation | `run_eval.py`, `eval_quality.py`, `run_benchmarks.py` |
+| 3 | Export | `export_coreml.py`, `export_student_gguf.sh`, `mlx_lm.convert` |
+| 4 | Agentic Feedback | `experiment_log.py`, `run_distillation_agent.py` |
+
+### Optimization Phases (cumulative improvements to the pipeline)
+
+| Phase | Speedup | Key optimizations |
+|-------|---------|-------------------|
+| Phase 1 | 40–50% | Flash Attention 2, torch.compile(), reduced eval_steps |
+| Phase 1.5 | +13–20% | DataLoader workers, batch tuning, early stopping, memory clearing |
+| **Cumulative** | **51–58%** | 7.2 hrs → 3.0–3.5 hrs for 5-trial autonomous run |
+
+### Quality Gate Phases (layered evaluation depth)
+
+| Phase | Focus | Key metrics |
+|-------|-------|-------------|
+| QG Phase 1 | Batch inference + basic filters | Pass rate, refusal rate, length |
+| QG Phase 2 | Quality depth | Category balance, teacher PPL, embedding diversity |
+| QG Phase 3 | Optimization | MLX backend, UMAP viz, volume guidance |
+
+**→ Full in-depth explanation of all phases: [ARCHITECTURE.md](ARCHITECTURE.md)**
 
 ---
 
@@ -162,31 +199,36 @@ See [docs/WATCHDOG.md](docs/WATCHDOG.md).
 distill/
 ├── configs/
 │   ├── agent_config.json     # Agent defaults (backend, export, epochs, ...)
-│   └── watchdog_rules.json   # Plateau + thermal thresholds
+│   └── watchdog_rules.json   # Plateau + divergence thresholds
 ├── cpp/                      # C++ LibTorch distillation + watchdog
 │   ├── CMakeLists.txt
 │   ├── main.cpp
-│   ├── watchdog_main.cpp     # Watchdog (no LibTorch)
+│   ├── watchdog_main.cpp     # Watchdog (no LibTorch required)
 │   └── third_party/nlohmann/json.hpp
 ├── docs/
 │   ├── USER_MANUAL.md        # ← Full step-by-step user manual
-│   ├── AUTONOMOUS_AGENT.md
+│   ├── AUTONOMOUS_AGENT.md   # Agent usage & LaunchAgent setup
 │   ├── SOFTWARE_DESIGN_DOCUMENT.md
-│   ├── air-gapped.md
-│   ├── WATCHDOG.md
-│   └── QUANTIZATION.md
+│   ├── air-gapped.md         # Offline operation checklist
+│   ├── WATCHDOG.md           # Plateau detection reference
+│   ├── QUANTIZATION.md       # Post-training quantization guide
+│   ├── LLAMA_CPP_STUDENT.md  # GGUF/llama-server deployment
+│   └── UNIVERSAL_GRADIO.md   # Dashboard usage guide
 ├── scripts/
 │   # Training scripts
 │   ├── distill_minillm.py    # PyTorch/MPS backend (MiniLLM, reverse KL)
 │   ├── distill_mlx.py        # MLX backend (Apple-native, 2-5× faster)
 │   ├── distill_unsloth.py    # Unsloth backend (optimized LoRA + KD)
-│   ├── distill_sft.py        # Supervised fine-tuning
-│   ├── distill_forward.py    # Forward KL (classification)
+│   ├── distill_sft.py        # Supervised fine-tuning warmup
+│   ├── distill_forward.py    # Forward KL (classification models)
+│   ├── data_pipeline.py      # Shared dataset loading + tokenization
 │   # Orchestration & agents
 │   ├── run_distillation_agent.py  # End-to-end pipeline orchestrator
+│   ├── experiment_log.py     # Agentic experiment memory (JSONL)
 │   ├── thermal_agent.py      # System-wide thermal monitoring & protection
-│   ├── training_watchdog.py  # Plateau detection monitor (Python)
-│   ├── watchdog_callbacks.py # PauseFlagCallback + MetricsCallback
+│   ├── training_watchdog.py  # Plateau + divergence detection (Python)
+│   ├── watchdog_callbacks.py # PauseFlagCallback + MetricsCallback (HF Trainer)
+│   ├── early_stopping_callback.py # Early stop on diverging trials
 │   # Thermal monitoring & control
 │   ├── monitor_cpu_gpu_temp.py    # Thermal logging via mactop
 │   ├── fan_control_popup.py  # Fan control GUI with temp display
@@ -195,22 +237,34 @@ distill/
 │   ├── export_coreml.py      # CoreML export → .mlpackage (ANE)
 │   ├── export_student_gguf.sh     # GGUF export wrapper
 │   # Dashboard & visualization
-│   ├── dashboard.py          # Gradio: plots + eval + artifacts
+│   ├── dashboard.py          # Gradio: plots + eval + artifacts + thermal
 │   ├── eval_gradio.py        # Standalone eval UI
 │   ├── plot_training.py      # Loss/LR curves
 │   ├── plot_gguf_pipeline.py # Pipeline summary (GGUF/CoreML/MLX artifacts)
 │   # Evaluation & quality
-│   ├── eval_quality.py       # Quality gates and metrics
-│   ├── run_eval.py           # Validation loss evaluation
-│   ├── run_benchmarks.py     # Benchmark suite
+│   ├── eval_quality.py       # Quality gates: batch gen, refusal, diversity, judge
+│   ├── run_eval.py           # Validation perplexity evaluation
+│   ├── run_benchmarks.py     # WikiText-2 benchmark suite
 │   # Data & offline support
 │   ├── cache_models.py       # Pre-download HF models for offline use
 │   ├── cache_datasets.py     # Pre-download datasets for offline use
-│   ├── setup_airgap.py       # Air-gap setup automation
-│   ├── generate_synthetic_data.py # Synthetic dataset generation
+│   ├── setup_airgap.py       # Air-gap bundle automation
+│   ├── generate_synthetic_data.py # Synthetic instruction-response generation
+│   ├── filter_dataset.py     # Dataset deduplication + quality filtering
 │   # Service management
-│   ├── start.sh              # Launch all services in background
-│   └── stop.sh               # Stop all background services
+│   ├── start.sh              # Launch all services in tmux session 'distill' with caffeinate
+│   └── stop.sh               # Stop all services and kill distill tmux sessions
+├── # Root-level documentation
+├── ARCHITECTURE.md           # ← In-depth pipeline phases & design
+├── BACKEND_OPTIMIZATIONS.md  # Backend feature matrix + optimization guide
+├── SPEEDUP_PHASE1.md         # Phase 1 speedup: Flash Attn + compile (40-50%)
+├── SPEEDUP_PHASE1_5.md       # Phase 1.5 speedup: DataLoader + early stop (+15-20%)
+├── PRODUCTION_QUALITY_GATES.md  # Quality gates Phases 1-3 implementation
+├── QUALITY_GATES_QUICKSTART.md  # Quick start for quality evaluation
+├── THERMAL_AGENT.md          # Thermal protection reference
+├── STARTUP_GUIDE.md          # Terminal startup sequence
+├── AIRGAP_SETUP.md           # Air-gap staging guide
+├── MULTI_USER_SETUP.md       # Shared model storage setup
 ├── environment.yml
 ├── requirements.txt
 └── README.md

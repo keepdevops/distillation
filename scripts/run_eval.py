@@ -243,8 +243,8 @@ def main():
                 "teacher_eval_perplexity": t_ppl,
                 "ppl_gap_pct": gap_pct,
             })
-        except Exception as e:
-            logger.warning("Teacher eval failed (non-fatal): %s", e)
+        except Exception:
+            raise
 
     if args.quant_dir:
         qpath = Path(args.quant_dir)
@@ -264,8 +264,8 @@ def main():
                     "quant_eval_perplexity": q_ppl,
                     "quant_ppl_gap_pct": q_gap_pct,
                 })
-            except Exception as e:
-                logger.warning("Quant eval failed (non-fatal): %s", e)
+            except Exception:
+                raise
         else:
             logger.warning("--quant_dir not found: %s", args.quant_dir)
 

@@ -138,3 +138,6 @@ $RECYCLE.BIN/
 *.tar.gz
 *.rar
 *.7z
+# pixi environments
+.pixi/*
+!.pixi/config.toml

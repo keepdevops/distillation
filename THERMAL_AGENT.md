@@ -338,13 +338,13 @@ python scripts/distill_minillm.py --open --watchdog
 python scripts/thermal_agent.py --watch ./distilled-minillm ./distilled-mlx ./distilled-sft
 
 # Terminal 2: Run training job 1
-python scripts/distill_minillm.py --open --watchdog &
+python scripts/distill_mlx.py --open --watchdog &
 
 # Terminal 3: Run training job 2
 python scripts/distill_sft.py --open --watchdog &
 
-# Terminal 4: Run benchmarks
-python scripts/run_benchmarks.py ./model --watchdog &
+# Terminal 4: Run benchmarks (no --watchdog flag for run_benchmarks.py)
+python scripts/run_benchmarks.py ./model &
 ```
 
 **Behavior:**
@@ -360,9 +360,9 @@ python scripts/run_benchmarks.py ./model --watchdog &
 ./scripts/install_thermal_agent.sh
 
 # Run jobs anytime - thermal protection automatic
-python scripts/distill_minillm.py --open --watchdog
+python scripts/distill_mlx.py --open --watchdog
 python scripts/eval_quality.py ./model
-python scripts/export_gguf.sh ./model
+./scripts/export_student_gguf.sh ./model
 
 # All jobs protected automatically
 # Agent survives reboots, always watching
@@ -422,7 +422,7 @@ mactop --headless --format json --count 1
 **Check:**
 ```bash
 # View pause.flag content
-cat ./distilled-minillm/pause.flag | jq
+cat ./distilled-mlx/pause.flag | jq
 
 # If "agent": "thermal_agent" → thermal agent should clear it
 # If no "agent" field → created by training_watchdog, manual intervention needed
@@ -431,7 +431,7 @@ cat ./distilled-minillm/pause.flag | jq
 ps aux | grep thermal_agent
 
 # Check current temp
-mactop --headless --format json --count 1 | jq '.[0].soc_metrics.soc_temp'
+mactop --headless --format json --count 1 | jq '.soc_temp'
 ```
 
 ### "Multiple thermal agents running"
@@ -613,4 +613,4 @@ Usage:
 
 ---
 
-**Last updated:** 2026-03-03 (Thermal Agent v1.0)
+**Last updated:** 2026-03-08

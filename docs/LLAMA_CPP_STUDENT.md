@@ -2,112 +2,126 @@
 
 Run your distilled student with **llama.cpp** for fast, lightweight inference on M3.
 
+**llama.cpp location on this machine:** `/Users/Shared/llama`
+**GGUF model output directory:** `/Users/Shared/llama/models/`
+**llama-server binary:** `/Users/Shared/llama/llama-server`
+
 ## Workflow
 
 ```
-distill_minillm.py  →  convert_hf_to_gguf.py  →  llama-server / main
-(HuggingFace)             (GGUF)                    (llama.cpp)
+distill_mlx.py or distill_minillm.py
+        ↓
+run_distillation_agent.py (--export gguf or --export all)
+        ↓  [agent handles conversion automatically]
+convert_hf_to_gguf.py → student.gguf
+        ↓
+llama-server -m student.gguf
 ```
+
+The agent (`run_distillation_agent.py --export gguf`) handles conversion automatically. Manual steps below are for custom workflows.
 
 ---
 
-## 1. Distill (produces student in HuggingFace format)
+## 1. Distill (produces student model)
 
-**Open models (no login):**
+**Recommended — MLX backend:**
+```bash
+python scripts/distill_mlx.py --open --output_dir ./distilled-mlx
+```
+
+**Or PyTorch backend:**
 ```bash
 python scripts/distill_minillm.py --open --output_dir ./distilled-minillm
 ```
 
-**Meta Llama (requires login + license):**
+**Or run the full agent (distill + export in one command):**
 ```bash
-huggingface-cli login   # + accept Meta license
-python scripts/distill_minillm.py --output_dir ./distilled-minillm
+python scripts/run_distillation_agent.py --open --backend mlx --export gguf
+# GGUF saved to ./distilled-mlx/student-f16.gguf
 ```
-
-Output: `./distilled-minillm/` with `config.json`, `model.safetensors`, tokenizer files.
 
 ---
 
-## 2. Convert student to GGUF
+## 2. Convert student to GGUF (manual)
 
-Clone **llama.cpp** (inside project or sibling):
+llama.cpp is pre-installed at `/Users/Shared/llama`. No cloning needed.
+
+**Prerequisite:** `pip install sentencepiece` (required for Qwen/Llama tokenizers).
+
+**Helper script** (auto-detects llama.cpp location):
 
 ```bash
-git clone https://github.com/ggerganov/llama.cpp.git
-# Inside project: distill/llama.cpp
-# Or sibling: ../llama.cpp
+./scripts/export_student_gguf.sh ./distilled-mlx
+# Runs in tmux session 'distill-export'; attach with: tmux attach -t distill-export
 ```
 
-**Prerequisite:** `pip install sentencepiece` (required for Qwen/Llama tokenizers in convert_hf_to_gguf).
-
-**Helper script** (auto-detects `./llama.cpp` or `../llama.cpp`):
+**Manual** (from project root):
 
 ```bash
-./scripts/export_student_gguf.sh ./distilled-minillm
-# Or: ./scripts/export_student_gguf.sh ./distilled-minillm ./llama.cpp
-```
-
-**Manual** (from llama.cpp dir):
-
-```bash
-cd llama.cpp
-pip install -r requirements.txt
-python convert_hf_to_gguf.py /path/to/distill/distilled-minillm \
-  --outfile distilled-student.gguf \
+python /Users/Shared/llama/convert_hf_to_gguf.py ./distilled-mlx \
+  --outfile /Users/Shared/llama/models/student-f16.gguf \
   --outtype f16
 ```
 
 **Quantization options** (smaller = faster, lower quality):
 
-| `--outtype` | Size (1B) | Use |
-|-------------|-----------|-----|
-| `f16` | ~2.5 GB | Best quality |
-| `q8_0` | ~1.3 GB | High quality |
-| `q4_K_M` | ~700 MB | Balanced |
-| `q4_0` | ~600 MB | Compact |
+| `--outtype` | Size (0.5B model) | Size (1B model) | Use case |
+|-------------|-------------------|-----------------|----------|
+| `f16` | ~1.0 GB | ~2.5 GB | Best quality, reference |
+| `q8_0` | ~0.5 GB | ~1.3 GB | High quality |
+| `q4_K_M` | ~0.3 GB | ~700 MB | Balanced (default production) |
+| `q4_0` | ~0.25 GB | ~600 MB | Compact |
 
 ---
 
 ## 3. Run with llama.cpp
 
-**Build llama.cpp** (ARM64 / M3):
-
+**Server (OpenAI-compatible API):**
 ```bash
-cd llama.cpp
-cmake -B build -DGGML_METAL=ON
-cmake --build build
+/Users/Shared/llama/llama-server \
+  -m /Users/Shared/llama/models/student-f16.gguf \
+  --host 127.0.0.1 \
+  --port 8080 \
+  -c 2048
 ```
 
-**Interactive (CLI):**
+Then `curl http://127.0.0.1:8080/completion` or use any OpenAI-compatible client.
+
+**Interactive CLI:**
 ```bash
-./build/bin/main -m distilled-student.gguf -p "Hello" -n 128
+/Users/Shared/llama/llama-cli \
+  -m /Users/Shared/llama/models/student-f16.gguf \
+  -p "Hello" -n 128
 ```
 
-**Server (API):**
+**Build from source** (if binary unavailable):
 ```bash
-./build/bin/llama-server -m distilled-student.gguf --host 127.0.0.1 -c 2048
+cd /Users/Shared/llama
+cmake -B build          # Metal enabled by default on macOS
+cmake --build build --config Release
 ```
-
-Then `curl http://127.0.0.1:8080/completion` or use OpenAI-compatible clients.
 
 ---
 
-## Air-gapped
+## 4. Chat template
 
-1. **Staging:** Run distill + convert; produce `distilled-student.gguf`
-2. **Transfer:** Copy GGUF + `llama.cpp/build/bin` to USB
-3. **Target:** Run `./llama-server -m distilled-student.gguf`
+For instruction-tuned models (Qwen, Llama), pass the chat template:
 
-No Python or HuggingFace required on target—just the GGUF and llama.cpp binary.
+```bash
+/Users/Shared/llama/llama-server \
+  -m /Users/Shared/llama/models/student-f16.gguf \
+  --chat-template qwen
+  # or: --chat-template llama3
+```
+
+Or use `--jinja` with a custom template file.
 
 ---
 
-## Chat template
+## Air-Gapped Deployment
 
-Llama-3.2 uses a specific chat format. If using `llama-server`, pass the chat template:
+1. **Staging:** Run distill + convert; produce GGUF at `/Users/Shared/llama/models/`
+2. **Transfer:** Copy GGUF + `llama-server` binary to USB
+3. **Target:** `./llama-server -m student-f16.gguf`
 
-```bash
-./build/bin/llama-server -m distilled-student.gguf --chat-template llama
-```
-
-Or use `--jinja` with a custom template file for instruction-tuning.
+No Python or HuggingFace required on target — just the GGUF and the llama-server binary.

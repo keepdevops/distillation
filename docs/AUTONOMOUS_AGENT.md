@@ -11,6 +11,27 @@ Run the distillation pipeline end-to-end without manual steps. Two approaches:
 
 Single script runs the full workflow. Use for headless runs, cron jobs, or LaunchAgent.
 
+### Production launcher (tmux + caffeinate)
+
+`run_autonomous_production.sh` is the recommended entry point for long runs. It automatically:
+
+- **tmux**: Relaunches itself inside a named tmux session (`distill-prod`) so the run survives terminal disconnects.
+- **caffeinate**: Prevents macOS from sleeping while on AC power for the full duration of the run.
+
+```bash
+./run_autonomous_production.sh
+```
+
+If tmux is not installed: `brew install tmux`
+
+Useful tmux commands while the run is active:
+
+| Command | Action |
+|---------|--------|
+| `Ctrl-B D` | Detach (run keeps going) |
+| `tmux attach -t distill-prod` | Re-attach from any terminal |
+| `tmux kill-session -t distill-prod` | Abort the run |
+
 ### Quick start
 
 ```bash
@@ -175,16 +196,16 @@ cache_models.py + cache_datasets.py  (optional, for air-gapped)
          ↓
 run_distillation_agent.py --open --backend mlx --export all --watchdog
          ↓
-distill_mlx.py  →  distilled-minillm/
+distill_mlx.py  →  distilled-mlx/
          │               metrics.jsonl  (dashboard picks this up)
          │               mlx_student_weights.npz
          │               mlx_q4/  (MLX quantized)
          ↓
-convert_hf_to_gguf.py  →  distilled-minillm-f16.gguf
+/Users/Shared/llama/convert_hf_to_gguf.py  →  student-f16.gguf
          ↓
-export_coreml.py  →  distilled-minillm.mlpackage  (Apple Neural Engine)
+export_coreml.py  →  distilled-mlx.mlpackage  (Apple Neural Engine)
          ↓
-llama-server -m distilled-minillm-f16.gguf
+/Users/Shared/llama/llama-server -m student-f16.gguf --port 8080
 ```
 
 The orchestrator handles steps 2–4 automatically when `--export all` is set.

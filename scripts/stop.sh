@@ -73,5 +73,13 @@ if [ -f "$PID_FILE" ]; then
   rm -f "$PID_FILE"
 fi
 
+# --- Kill distill tmux sessions ---
+for sess in distill distill-phase2 distill-export distill-download distill-thermal; do
+  if tmux has-session -t "$sess" 2>/dev/null; then
+    tmux kill-session -t "$sess"
+    echo "    [killed] tmux session: $sess"
+  fi
+done
+
 echo ""
 echo "==> All distill processes stopped."

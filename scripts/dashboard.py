@@ -603,7 +603,7 @@ def main():
                         if has_temp:
                             def _f(v):
                                 try: return float(v)
-                                except: return float("nan")
+                                except (TypeError, ValueError): return float("nan")
                             cpu_t.append(_f(row.get("cpu_temp_c", "")))
                             gpu_t.append(_f(row.get("gpu_temp_c", "")))
                             soc_t.append(_f(row.get("soc_temp_c", "")))

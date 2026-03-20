@@ -62,6 +62,7 @@ python scripts/cache_datasets.py --output ./datasets_cache --disk
 
 ```bash
 ./scripts/download_bartowski_gguf.sh ./gguf_models
+# Runs in tmux session 'distill-download'; attach with: tmux attach -t distill-download
 ```
 
 Single-file curl (US origin):
@@ -155,7 +156,25 @@ Expected: `MPS: True`
 ```bash
 export HF_HOME=/path/to/copied/hf_cache
 export HF_DATASETS_CACHE=/path/to/copied/datasets_cache
+```
 
+**Recommended — MLX backend (2–5× faster on M3):**
+```bash
+python scripts/run_distillation_agent.py --offline --open \
+  --backend mlx \
+  --export gguf \
+  --output_dir ./distilled-mlx
+```
+
+**PyTorch backend — open models (no Meta license):**
+```bash
+python scripts/distill_minillm.py --offline --open \
+  --dataset /path/to/copied/datasets_cache/tatsu-lab_alpaca \
+  --output_dir ./distilled-minillm
+```
+
+**PyTorch backend — Meta Llama (requires pre-cached gated models):**
+```bash
 python scripts/distill_minillm.py --offline \
   --teacher meta-llama/Llama-3.2-8B-Instruct \
   --student meta-llama/Llama-3.2-1B-Instruct \
@@ -163,14 +182,7 @@ python scripts/distill_minillm.py --offline \
   --output_dir ./distilled
 ```
 
-**Open models (no Meta license):**
-```bash
-python scripts/distill_minillm.py --offline --open \
-  --dataset /path/to/copied/datasets_cache/tatsu-lab_alpaca \
-  --output_dir ./distilled
-```
-
-`--offline` sets `local_files_only` for models; use pre-cached paths for `--dataset` (from `cache_datasets.py --disk`).
+`--offline` sets `HF_HUB_OFFLINE=1` and `HF_DATASETS_OFFLINE=1` automatically.
 
 ---
 
@@ -179,10 +191,14 @@ python scripts/distill_minillm.py --offline --open \
 Convert distilled student to GGUF and run with llama.cpp (no Python on target):
 
 ```bash
-# On staging: after distill
-python ../llama.cpp/convert_hf_to_gguf.py ./distilled-minillm --outfile distilled-student.gguf --outtype f16
-# Transfer: distilled-student.gguf + llama.cpp build
-# On target: ./llama-server -m distilled-student.gguf
+# On staging: after distill (agent handles this automatically with --export gguf)
+# Or manually:
+python /Users/Shared/llama/convert_hf_to_gguf.py ./distilled-mlx \
+  --outfile /Users/Shared/llama/models/distilled-student.gguf --outtype f16
+
+# Transfer: distilled-student.gguf + llama-server binary to USB
+# On target:
+./llama-server -m distilled-student.gguf --port 8080
 ```
 
 See [LLAMA_CPP_STUDENT.md](LLAMA_CPP_STUDENT.md).

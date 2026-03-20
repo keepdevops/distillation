@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,7 +36,6 @@ from data_pipeline import load_dataset_split, format_prompt_only, validate_datas
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    DataCollatorForLanguageModeling,
     Trainer,
     TrainingArguments,
 )
@@ -114,26 +114,54 @@ def generate_labels(teacher_model, tokenizer, prompts: list[str],
     return responses
 
 
-def build_training_texts(prompts: list[str], responses: list[str]) -> list[str]:
-    """Concatenate prompt + response into full training sequences."""
-    return [f"{p} {r}" for p, r in zip(prompts, responses)]
-
-
 class SFTDataset(torch.utils.data.Dataset):
-    def __init__(self, texts: list[str], tokenizer, max_length: int):
-        self.encodings = tokenizer(
-            texts,
-            truncation=True,
-            max_length=max_length,
-            padding="max_length",
-            return_tensors="pt",
-        )
+    """
+    Tokenizes prompt+response with prompt tokens masked to -100 in labels.
+    The model only learns to predict response tokens; prompt and padding
+    positions are excluded from the cross-entropy loss.
+    """
+    IGNORE = -100
+
+    def __init__(self, prompts: list[str], responses: list[str], tokenizer, max_length: int):
+        input_ids_list, attn_list, label_list = [], [], []
+        for prompt, response in zip(prompts, responses):
+            # Prompt token count (with BOS) — used to mask prompt positions in labels.
+            # add_special_tokens=True matches how the full sequence is tokenized.
+            prompt_len = len(tokenizer.encode(prompt, add_special_tokens=True))
+
+            full = tokenizer(
+                prompt + " " + response,
+                truncation=True,
+                max_length=max_length,
+                padding="max_length",
+                return_tensors="pt",
+            )
+            ids  = full["input_ids"][0]
+            mask = full["attention_mask"][0]
+
+            # Labels: -100 for prompt tokens and padding tokens.
+            # Only response positions contribute to the loss.
+            labels = ids.clone()
+            labels[:prompt_len]  = self.IGNORE  # mask prompt
+            labels[mask == 0]    = self.IGNORE  # mask padding
+
+            input_ids_list.append(ids)
+            attn_list.append(mask)
+            label_list.append(labels)
+
+        self.input_ids      = torch.stack(input_ids_list)
+        self.attention_mask = torch.stack(attn_list)
+        self.labels         = torch.stack(label_list)
 
     def __len__(self):
-        return self.encodings["input_ids"].shape[0]
+        return len(self.input_ids)
 
     def __getitem__(self, idx):
-        return {k: v[idx] for k, v in self.encodings.items()}
+        return {
+            "input_ids":      self.input_ids[idx],
+            "attention_mask": self.attention_mask[idx],
+            "labels":         self.labels[idx],
+        }
 
 
 def main():
@@ -193,7 +221,7 @@ def main():
     if responses is None:
         logger.info("Loading teacher: %s", args.teacher)
         teacher = AutoModelForCausalLM.from_pretrained(
-            args.teacher, dtype=torch.bfloat16, device_map="auto",
+            args.teacher, torch_dtype=torch.bfloat16, device_map="auto",
             cache_dir=cache_dir, local_files_only=offline,
         )
         teacher.to(device)
@@ -212,29 +240,32 @@ def main():
         if device.type == "mps":
             torch.mps.empty_cache()
 
-    # Build training sequences
-    texts = build_training_texts(prompts, responses)
-
     # Load student with LoRA
     logger.info("Loading student: %s", args.student)
     student = AutoModelForCausalLM.from_pretrained(
-        args.student, dtype=torch.bfloat16, device_map="auto",
+        args.student, torch_dtype=torch.bfloat16, device_map="auto",
         cache_dir=cache_dir, local_files_only=offline,
     )
     peft_cfg = LoraConfig(
         r=args.lora_r,
-        lora_alpha=128,
+        lora_alpha=args.lora_r * 2,  # scale=2.0 regardless of r (was hardcoded 128)
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_dropout=0.05,
+        lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",
     )
     student = get_peft_model(student, peft_cfg)
     student.print_trainable_parameters()
 
-    # Dataset
-    sft_dataset = SFTDataset(texts, tokenizer, args.max_length)
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    # Dataset — prompts and responses passed separately so SFTDataset can mask
+    # prompt tokens in labels (-100), ensuring only response tokens contribute to loss.
+    sft_dataset = SFTDataset(prompts, responses, tokenizer, args.max_length)
+
+    # Warmup steps (warmup_ratio deprecated in transformers 5.2)
+    _train_size = len(sft_dataset)
+    _steps_per_epoch = max(1, _train_size // (args.batch_size * args.grad_acc))
+    _total_steps = _steps_per_epoch * args.epochs
+    _warmup_steps = max(1, round(0.03 * _total_steps))
 
     # Training
     training_args = TrainingArguments(
@@ -244,18 +275,17 @@ def main():
         gradient_accumulation_steps=args.grad_acc,
         learning_rate=args.learning_rate,
         bf16=True,
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,  # 36GB M3 Max has plenty of RAM; checkpointing adds ~25% overhead
         optim="adamw_torch_fused",
         logging_steps=10,
         save_steps=500,
         save_total_limit=1,
         remove_unused_columns=False,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.03,
+        warmup_steps=_warmup_steps,
         report_to="none",
-        dataloader_pin_memory=False,   # MPS does not support pin_memory
-        dataloader_num_workers=4,      # Parallel data loading (5-10% speedup)
-        dataloader_prefetch_factor=2,  # Pre-load 2 batches per worker
+        dataloader_pin_memory=False,  # MPS does not support pin_memory
+        dataloader_num_workers=0,     # MPS: forking workers causes instability; data is pre-tokenized so overhead is minimal
     )
 
     callbacks = []
@@ -267,7 +297,8 @@ def main():
         model=student,
         args=training_args,
         train_dataset=sft_dataset,
-        data_collator=collator,
+        # No data_collator: SFTDataset pre-tokenizes with explicit labels (-100 masking).
+        # default_data_collator (used when None) just stacks the pre-built tensors.
         callbacks=callbacks,
     )
 
@@ -283,4 +314,5 @@ def main():
 
 
 if __name__ == "__main__":
+    subprocess.Popen(['caffeinate', '-i', 'sleep', '3600'])
     main()

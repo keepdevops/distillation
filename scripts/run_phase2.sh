@@ -11,13 +11,29 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RUN="${1:-all}"
+SESSION="distill-phase2"
+
+# If not inside tmux, relaunch in a new tmux session with caffeinate
+if [ -z "${TMUX:-}" ]; then
+  if ! command -v tmux &>/dev/null; then
+    echo "Error: tmux not found. Install with: brew install tmux"
+    exit 1
+  fi
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  tmux new-session -d -s "$SESSION" -x 220 -y 50
+  tmux send-keys -t "$SESSION" \
+    "caffeinate -dims bash $(realpath "$0") $RUN; echo '==> Phase 2 done. Press Enter to close.'; read" Enter
+  echo "==> Phase 2 launched in tmux session '$SESSION'"
+  echo "    Attach with: tmux attach -t $SESSION"
+  exit 0
+fi
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [phase2] $*"; }
 
 run_variant() {
     local id="$1" cfg="$2"
     log "=== Starting run-$id (config: $cfg) ==="
-    python scripts/run_distillation_agent.py \
+    pixi run python scripts/run_distillation_agent.py \
         --config "$cfg" \
         2>&1 | tee "runs/phase2-run${id}.log"
     log "=== Finished run-$id ==="

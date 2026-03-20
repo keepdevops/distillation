@@ -80,27 +80,31 @@ source ~/.zshrc
 **Always use `--offline` flag:**
 
 ```bash
+# Recommended: MLX backend (2-5× faster on M3)
 python scripts/run_distillation_agent.py \
     --open \
     --offline \
+    --backend mlx \
     --n_trials 3 \
     --epochs 2 \
-    --export gguf \
+    --export all \
     --log_experiment
 ```
 
 **All supported offline commands:**
 
 ```bash
-# Minimal run
+# Minimal run (MLX)
 python scripts/run_distillation_agent.py \
     --open --offline \
+    --backend mlx \
     --epochs 2 \
     --export gguf
 
-# Full featured
+# PyTorch backend (maximum compatibility)
 python scripts/run_distillation_agent.py \
     --open --offline \
+    --backend pytorch \
     --epochs 2 \
     --max_samples 2000 \
     --export gguf \
@@ -120,12 +124,12 @@ Edit `configs/agent_config.json`:
 
 ```json
 {
-  "output_dir": "./distilled-minillm",
+  "output_dir": "./distilled-mlx",
   "open": true,
-  "offline": true,    ← Add this
+  "offline": true,
   "watchdog": false,
-  "backend": "pytorch",
-  "export": "gguf",
+  "backend": "mlx",
+  "export": "all",
   "epochs": 2,
   "max_samples": 2000
 }
@@ -244,7 +248,7 @@ Before going fully air-gapped, verify:
 
 - [ ] Models cached: `ls ~/.cache/huggingface/hub/ | grep Qwen`
 - [ ] Datasets cached: `ls ~/.cache/huggingface/datasets/ | grep alpaca`
-- [ ] Test run works: `python scripts/run_distillation_agent.py --open --offline --epochs 1 --max_samples 10 --skip_eval --export none`
+- [ ] Test run works: `python scripts/run_distillation_agent.py --open --offline --backend mlx --epochs 1 --max_samples 10 --skip_eval --export none`
 - [ ] No network warnings in logs
 - [ ] `--offline` flag added to all commands
 - [ ] Environment variables set (optional but recommended)

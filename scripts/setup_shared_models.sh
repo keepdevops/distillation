@@ -19,7 +19,7 @@ if [ ! -d "$MODEL_PATH" ]; then
 fi
 
 echo "✓ Shared model directory: $MODEL_PATH"
-ls -lh "$MODEL_PATH" 2>/dev/null | tail -n +2 | awk '{print "  " $0}'
+ls -lh "$MODEL_PATH" | tail -n +2 | awk '{print "  " $0}'
 
 # Add to .zshrc if not already there
 ZSHRC="$HOME/.zshrc"

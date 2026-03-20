@@ -10,11 +10,17 @@ If you don't have access, use **open models** instead.
 
 ## Quick: Use `--open` flag
 
+**Recommended — MLX backend (2–5× faster on M3):**
+```bash
+python scripts/distill_mlx.py --open --output_dir ./distilled-mlx
+```
+
+**PyTorch backend:**
 ```bash
 python scripts/distill_minillm.py --open --output_dir ./distilled-minillm
 ```
 
-Uses **Qwen2-1.5B-Instruct** → **Qwen2-0.5B-Instruct** (no login).
+Both use **Qwen2-1.5B-Instruct** → **Qwen2-0.5B-Instruct** (no login required).
 
 ---
 
@@ -39,10 +45,12 @@ python scripts/distill_minillm.py \
 ## Then: Convert to GGUF
 
 ```bash
-./scripts/export_student_gguf.sh ./distilled-minillm ../llama.cpp
-```
+# Agent handles this automatically with --export gguf
+python scripts/run_distillation_agent.py --open --backend mlx --export gguf
 
-(or `./distilled-qwen` if you used Qwen)
+# Or manually (llama.cpp at /Users/Shared/llama):
+./scripts/export_student_gguf.sh ./distilled-mlx
+```
 
 ---
 

@@ -17,6 +17,7 @@ Usage:
     python scripts/generate_synthetic_data.py --open --n_generate 5000 \
         --output_dir ./my_synthetic_data
 """
+from __future__ import annotations
 
 import argparse
 import json
@@ -234,6 +235,7 @@ def main():
         args.teacher, cache_dir=cache_dir, local_files_only=offline,
     )
     tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
     model = AutoModelForCausalLM.from_pretrained(
         args.teacher, dtype=torch.bfloat16, device_map="auto",
         cache_dir=cache_dir, local_files_only=offline,

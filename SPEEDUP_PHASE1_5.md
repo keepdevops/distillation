@@ -1,8 +1,10 @@
 # Phase 1.5 Speedup Optimizations (Quick Wins)
 
 **Implementation Date:** 2026-03-03
-**Expected Additional Speedup:** 15-20% (1-1.5 hours saved per 5-trial run)
-**Cumulative Total:** 50-60% speedup combined with Phase 1
+**Expected Additional Speedup:** 15–20% on top of Phase 1 (1–1.5 hours saved per 5-trial run)
+**Cumulative Total:** 51–58% speedup combined with Phase 1
+
+> **See also:** [ARCHITECTURE.md](ARCHITECTURE.md) for the full in-depth explanation of both Phase 1 and Phase 1.5 optimizations, including theoretical background on each technique.
 
 ---
 
