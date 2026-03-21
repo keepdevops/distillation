@@ -14,8 +14,6 @@ Usage:
 """
 from __future__ import annotations
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging
@@ -309,8 +307,8 @@ def _build_distill_cmd(args, output_dir: Path,
             "--grad_acc", str(getattr(args, "grad_acc", 8)),
             "--learning_rate", str(getattr(args, "learning_rate", 2e-5)),
             "--eval_steps", str(getattr(args, "eval_steps", 20)),
-            "--num_generations", str(getattr(args, "num_generations", 2)),
-            "--max_new_tokens", str(getattr(args, "max_new_tokens", 128)),
+            "--num_generations", str(getattr(args, "num_generations", 4)),
+            "--max_new_tokens", str(getattr(args, "max_new_tokens", 256)),
         ]
         if args.open:
             cmd.append("--open")
@@ -335,10 +333,12 @@ def _build_distill_cmd(args, output_dir: Path,
             "--q_bits", str(args.q_bits),
             "--seed", str(trial_seed),
             "--batch_size", str(getattr(args, "batch_size", 2)),
-            "--grad_acc", str(getattr(args, "grad_acc", 4)),
+            "--grad_acc", str(getattr(args, "grad_acc", 8)),
             "--learning_rate", str(getattr(args, "learning_rate", 2e-4)),
-            "--ce_alpha", str(getattr(args, "ce_alpha", 0.1)),
+            "--ce_alpha", str(getattr(args, "ce_alpha", 0.2)),
             "--multi_turn_ratio", str(getattr(args, "multi_turn_ratio", 0.0)),
+            "--eval_steps", str(getattr(args, "eval_steps", 50)),
+            "--topk_logits", str(getattr(args, "topk_logits", 50)),
         ]
         _ds = dataset_override or getattr(args, "dataset", None)
         if _ds:
@@ -360,9 +360,7 @@ def _build_distill_cmd(args, output_dir: Path,
         if getattr(args, "hard_weight_start", -1.0) >= 0:
             cmd += ["--hard_weight_start", str(args.hard_weight_start),
                     "--hard_weight_end", str(getattr(args, "hard_weight_end",
-                                                     getattr(args, "ce_alpha", 0.1)))]
-        if getattr(args, "topk_logits", 0) > 0:
-            cmd += ["--topk_logits", str(args.topk_logits)]
+                                                     getattr(args, "ce_alpha", 0.2)))]
 
     else:  # unsloth
         cmd = [
@@ -459,10 +457,10 @@ def main():
                          "64 risks OOM on MLX with full-vocab logit tensors.")
     ap.add_argument("--eval_steps", type=int, default=20,
                     help="Eval frequency in gradient steps for pytorch backend (default: 20)")
-    ap.add_argument("--num_generations", type=int, default=2,
-                    help="GRPO completions per prompt for pytorch backend (default: 2)")
-    ap.add_argument("--max_new_tokens", type=int, default=128,
-                    help="Max generation length for pytorch backend (default: 128)")
+    ap.add_argument("--num_generations", type=int, default=4,
+                    help="GRPO completions per prompt for pytorch backend (default: 4; fewer → frac_reward_zero_std high → no gradient)")
+    ap.add_argument("--max_new_tokens", type=int, default=256,
+                    help="Max generation length for pytorch backend (default: 256; paired with _MAX_NATURAL_CHARS=800 in distill_minillm.py)")
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--skip_eval", action="store_true",
                     help="Skip post-distillation eval steps (run_eval + eval_quality)")

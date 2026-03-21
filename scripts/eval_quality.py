@@ -28,11 +28,14 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 import numpy as np
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import GenerationConfig
 
 # Add scripts directory to path for local imports
 sys.path.insert(0, os.path.dirname(__file__))
-from data_pipeline import load_dataset_split, format_prompt_only
+from data_pipeline import load_dataset_split, format_prompt_only, REFUSAL_PATTERNS, is_refusal
+from train_utils import get_device, load_student_model
+from mlx_eval_utils import is_mlx_available, load_mlx_model, mlx_generate_responses, compute_mlx_perplexity
+from cpp_eval_utils import is_cpp_available, find_gguf, generate_gguf_responses, compute_gguf_perplexity
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -41,13 +44,6 @@ logger = logging.getLogger(__name__)
 MIN_RESPONSE_TOKENS = 10    # Minimum viable response length
 MAX_RESPONSE_TOKENS = 2000  # Maximum to prevent excessive generation
 TARGET_MIN_TOKENS = 200     # Target minimum for quality samples
-REFUSAL_PATTERNS = [
-    r"(?i)I(?:'m| am) sorry,?\s+(?:but\s+)?I (?:can'?t|cannot|am unable to)",
-    r"(?i)I (?:can'?t|cannot) (?:help|assist|provide|do)",
-    r"(?i)As an AI(?: language model| assistant)?,?\s+I (?:can'?t|cannot|don't|do not)",
-    r"(?i)I'?m not (?:able|allowed|programmed) to",
-    r"(?i)I don'?t have (?:the ability|access|permission)",
-]
 
 OPEN_STUDENT = "Qwen/Qwen2-0.5B-Instruct"
 OPEN_TEACHER = "Qwen/Qwen2-1.5B-Instruct"
@@ -87,73 +83,13 @@ def parse_args():
                    help="Batch size for generation and judging (default: 8)")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true")
-    p.add_argument("--backend", type=str, default="pytorch", choices=["pytorch", "mlx"],
-                   help="Backend for inference (mlx for Apple Silicon optimization)")
+    p.add_argument("--backend", type=str, default="auto", choices=["auto", "pytorch", "mlx", "gguf"],
+                   help="Backend for inference: gguf (llama.cpp/Metal) > mlx > pytorch for speed (default: auto)")
     return p.parse_args()
 
 
-def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def load_student(checkpoint_dir, student_id, cache_dir, offline, device):
-    tok_dir = str(checkpoint_dir) if (checkpoint_dir / "tokenizer_config.json").exists() else student_id
-    tokenizer = AutoTokenizer.from_pretrained(tok_dir, cache_dir=cache_dir, local_files_only=offline)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    is_adapter = (checkpoint_dir / "adapter_config.json").exists()
-    if is_adapter:
-        with open(checkpoint_dir / "adapter_config.json") as f:
-            adapter_cfg = json.load(f)
-        base_id = adapter_cfg.get("base_model_name_or_path", student_id)
-        from peft import PeftModel
-        base = AutoModelForCausalLM.from_pretrained(
-            base_id, dtype=torch.bfloat16, device_map="auto",
-            cache_dir=cache_dir, local_files_only=offline,
-        )
-        model = PeftModel.from_pretrained(base, str(checkpoint_dir))
-        model = model.merge_and_unload()
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            str(checkpoint_dir), dtype=torch.bfloat16, device_map="auto",
-            cache_dir=cache_dir, local_files_only=offline,
-        )
-    model.to(device)
-    model.eval()
-    return model, tokenizer
-
-
-def load_mlx_model(model_path):
-    """Load model using MLX for Apple Silicon optimization."""
-    try:
-        from mlx_lm import load
-    except ImportError:
-        raise ImportError("MLX not installed. Install with: pip install mlx-lm")
-
-    logger.info("Loading model with MLX backend...")
-    model, tokenizer = load(str(model_path))
-    return model, tokenizer
-
-
-def mlx_batch_generate(model, tokenizer, prompts, max_new_tokens, temperature):
-    """Generate responses using MLX backend (optimized for Apple Silicon)."""
-    from mlx_lm import generate
-
-    responses = []
-    for prompt in prompts:
-        # MLX generate is fast enough that batching is less critical
-        response = generate(
-            model, tokenizer, prompt=prompt,
-            max_tokens=max_new_tokens, temp=temperature
-        )
-        # Extract only generated text (after prompt)
-        if response.startswith(prompt):
-            response = response[len(prompt):].strip()
-        responses.append(response)
-
-    return responses
 
 
 @torch.no_grad()
@@ -163,15 +99,17 @@ def batch_generate_responses(model, tokenizer, prompts, max_new_tokens, temperat
     for i in range(0, len(prompts), batch_size):
         batch_prompts = prompts[i:i+batch_size]
         inputs = tokenizer(batch_prompts, return_tensors="pt", truncation=True,
-                          max_length=512, padding=True)
+                          max_length=512, padding=True, padding_side="left")
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=temperature,
-            pad_token_id=tokenizer.eos_token_id,
+            generation_config=GenerationConfig(
+                do_sample=True,
+                temperature=temperature,
+                pad_token_id=tokenizer.eos_token_id,
+            ),
         )
 
         # Decode only generated tokens (skip input)
@@ -182,13 +120,6 @@ def batch_generate_responses(model, tokenizer, prompts, max_new_tokens, temperat
 
     return all_responses
 
-
-def detect_refusal(text):
-    """Check if response contains refusal patterns. Returns True if refusal detected."""
-    for pattern in REFUSAL_PATTERNS:
-        if re.search(pattern, text):
-            return True
-    return False
 
 
 def check_length_valid(text, min_tokens=MIN_RESPONSE_TOKENS, max_tokens=MAX_RESPONSE_TOKENS):
@@ -214,7 +145,7 @@ def check_quality_gates(response, instruction=""):
         return False, f"too_long ({length} > {MAX_RESPONSE_TOKENS})", {"too_long": True}
 
     # Refusal check
-    if detect_refusal(response):
+    if is_refusal(response):
         return False, "refusal_detected", {"refusal": True}
 
     # Warn if below target minimum but don't reject
@@ -481,24 +412,52 @@ def main():
     cache_dir = os.environ.get("HF_HOME") or args.cache_dir
     device = get_device()
 
-    # Backend selection
-    use_mlx = args.backend == "mlx"
-    if use_mlx:
-        import platform
-        if platform.processor() != "arm":
-            logger.warning("MLX backend requested but not on Apple Silicon, falling back to PyTorch")
-            use_mlx = False
+    # Backend selection: gguf (C++/Metal) > mlx > pytorch
+    use_gguf = False
+    use_mlx = False
+
+    if args.backend == "gguf":
+        if not is_cpp_available():
+            logger.warning("GGUF backend requested but llama.cpp binaries not found, falling back")
         else:
+            use_gguf = True
+            logger.info("Backend: GGUF/llama.cpp (Metal, parallel generation)")
+    elif args.backend == "mlx":
+        if not is_mlx_available():
+            logger.warning("MLX backend requested but mlx/mlx-lm not installed, falling back to PyTorch")
+        else:
+            use_mlx = True
             logger.info("Backend: MLX (Apple Silicon optimized)")
+    elif args.backend == "auto":
+        gguf_candidate = find_gguf(str(checkpoint_dir))
+        if gguf_candidate and is_cpp_available():
+            use_gguf = True
+            logger.info("Backend: GGUF/llama.cpp (auto-detected: %s)", Path(gguf_candidate).name)
+        elif is_mlx_available():
+            use_mlx = True
+            logger.info("Backend: MLX (auto-detected)")
+        else:
+            logger.info("Backend: PyTorch, Device: %s", device)
     else:
         logger.info("Backend: PyTorch, Device: %s", device)
 
     # Load student
     logger.info("Loading student from %s", checkpoint_dir)
-    if use_mlx:
+    gguf_student_path = None
+    if use_gguf:
+        gguf_student_path = find_gguf(str(checkpoint_dir))
+        if gguf_student_path is None:
+            logger.warning("No .gguf found in %s — falling back to MLX/PyTorch", checkpoint_dir)
+            use_gguf = False
+            use_mlx = is_mlx_available()
+
+    if use_gguf:
+        student, tokenizer = None, None   # generation handled via llama-server subprocess
+        logger.info("GGUF student: %s", gguf_student_path)
+    elif use_mlx:
         student, tokenizer = load_mlx_model(checkpoint_dir)
     else:
-        student, tokenizer = load_student(checkpoint_dir, args.student, cache_dir, offline, device)
+        student, tokenizer = load_student_model(checkpoint_dir, args.student, cache_dir, offline, device)
 
     # Load dataset
     ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
@@ -522,8 +481,15 @@ def main():
     prompts = [ex["prompt"] for ex in val_ds]
     instructions = [ex.get("instruction", ex["prompt"]) for ex in val_ds]
 
-    if use_mlx:
-        responses = mlx_batch_generate(
+    if use_gguf:
+        responses = generate_gguf_responses(
+            gguf_student_path, prompts,
+            max_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            n_parallel=args.batch_size,   # reuse batch_size as server parallelism
+        )
+    elif use_mlx:
+        responses = mlx_generate_responses(
             student, tokenizer, prompts, args.max_new_tokens, args.temperature
         )
     else:
@@ -629,7 +595,7 @@ def main():
 
     # Phase 3: Embedding diversity (compute before loading teacher)
     embedding_result = {"enabled": False}
-    if not use_mlx:
+    if not use_mlx and not use_gguf:
         logger.info("")
         logger.info("Computing embedding diversity...")
         try:
@@ -657,11 +623,12 @@ def main():
         except Exception as e:
             logger.warning("Failed to compute embedding diversity: %s", e)
     else:
-        logger.info("Skipping embedding diversity (not supported with MLX backend)")
+        logger.info("Skipping embedding diversity (not supported with MLX/GGUF backend)")
 
     # Phase 4: Teacher evaluation (judge + perplexity)
-    del student  # Free memory before loading teacher
-    if device.type == "mps":
+    if student is not None:
+        del student
+    if not use_gguf and not use_mlx and device.type == "mps":
         torch.mps.empty_cache()
 
     judge_result = {"enabled": False}
@@ -671,16 +638,23 @@ def main():
         logger.info("")
         logger.info("Loading teacher: %s", args.teacher)
 
-        judge_model = AutoModelForCausalLM.from_pretrained(
-            args.teacher, dtype=torch.bfloat16, device_map="auto",
-            cache_dir=cache_dir, local_files_only=offline,
-        )
-        judge_tok = AutoTokenizer.from_pretrained(
-            args.teacher, cache_dir=cache_dir, local_files_only=offline,
-        )
-        judge_tok.pad_token = judge_tok.eos_token
-        judge_model.to(device)
-        judge_model.eval()
+        gguf_teacher_path = find_gguf(args.teacher) if use_gguf else None
+        if use_gguf and gguf_teacher_path:
+            judge_model, judge_tok = None, None   # teacher gen via llama-server
+            logger.info("GGUF teacher: %s", gguf_teacher_path)
+        elif use_mlx:
+            judge_model, judge_tok = load_mlx_model(args.teacher)
+        else:
+            judge_model = AutoModelForCausalLM.from_pretrained(
+                args.teacher, dtype=torch.bfloat16, device_map="auto",
+                cache_dir=cache_dir, local_files_only=offline,
+            )
+            judge_tok = AutoTokenizer.from_pretrained(
+                args.teacher, cache_dir=cache_dir, local_files_only=offline,
+            )
+            judge_tok.pad_token = judge_tok.eos_token
+            judge_model.to(device)
+            judge_model.eval()
 
         # Teacher perplexity on student outputs
         if args.judge_teacher_ppl:
@@ -688,14 +662,28 @@ def main():
             sample_prompts = [s["prompt"] for s in samples]
             sample_responses = [s["response"] for s in samples]
 
-            teacher_ppls = compute_teacher_perplexity_on_responses(
-                judge_model, judge_tok, sample_prompts, sample_responses,
-                device, batch_size=4
-            )
-
-            avg_teacher_ppl = sum(teacher_ppls) / len(teacher_ppls) if teacher_ppls else None
-            for i, ppl in enumerate(teacher_ppls):
-                samples[i]["teacher_ppl"] = round(ppl, 2)
+            if use_gguf and gguf_teacher_path:
+                full_texts = [p + r for p, r in zip(sample_prompts, sample_responses)]
+                raw_loss = compute_gguf_perplexity(gguf_teacher_path, full_texts, ctx_size=1024)
+                avg_teacher_ppl = math.exp(min(raw_loss, 10)) if raw_loss else None
+                for i in range(len(samples)):
+                    samples[i]["teacher_ppl"] = round(avg_teacher_ppl, 2) if avg_teacher_ppl else None
+            elif use_mlx:
+                full_texts = [p + r for p, r in zip(sample_prompts, sample_responses)]
+                raw_losses = compute_mlx_perplexity(judge_model, judge_tok, full_texts, max_length=1024, batch_size=4)
+                # compute_mlx_perplexity returns mean loss; approximate per-sample as uniform
+                avg_teacher_ppl = math.exp(min(raw_losses, 10)) if raw_losses else None
+                teacher_ppls = [round(avg_teacher_ppl, 2)] * len(samples) if avg_teacher_ppl else []
+                for i in range(len(samples)):
+                    samples[i]["teacher_ppl"] = teacher_ppls[i] if teacher_ppls else None
+            else:
+                teacher_ppls = compute_teacher_perplexity_on_responses(
+                    judge_model, judge_tok, sample_prompts, sample_responses,
+                    device, batch_size=4
+                )
+                avg_teacher_ppl = sum(teacher_ppls) / len(teacher_ppls) if teacher_ppls else None
+                for i, ppl in enumerate(teacher_ppls):
+                    samples[i]["teacher_ppl"] = round(ppl, 2)
 
             teacher_ppl_result = {
                 "enabled": True,
@@ -706,17 +694,40 @@ def main():
             if avg_teacher_ppl and avg_teacher_ppl > 100:
                 logger.warning("High teacher perplexity (%.2f) on student outputs — check quality", avg_teacher_ppl)
 
-        # LLM-as-judge scoring
+        # LLM-as-judge scoring (PyTorch only — requires model.generate)
         if args.judge:
-            logger.info("Batch judging %d responses (batch_size=%d)...", len(samples), args.batch_size)
-
-            sample_instructions = [s["instruction"] for s in samples]
-            sample_responses = [s["response"] for s in samples]
-
-            judgments = batch_judge_responses(
-                judge_model, judge_tok, sample_instructions, sample_responses,
-                device, args.batch_size
-            )
+            if use_gguf and gguf_teacher_path:
+                logger.info(
+                    "GGUF judge: %d judgments via llama-server (parallel=%d)...",
+                    len(samples), args.batch_size,
+                )
+                judge_prompts = [
+                    JUDGE_PROMPT.format(instruction=s["instruction"], response=s["response"])
+                    for s in samples
+                ]
+                judgments = generate_gguf_responses(
+                    gguf_teacher_path, judge_prompts,
+                    max_tokens=60, temperature=0.0,
+                    n_parallel=args.batch_size,
+                    port=8090,  # use different port from student server
+                )
+            elif use_mlx:
+                logger.info("MLX judge: generating %d judgments sequentially...", len(samples))
+                sample_instructions = [s["instruction"] for s in samples]
+                sample_responses_list = [s["response"] for s in samples]
+                judge_prompts = [
+                    JUDGE_PROMPT.format(instruction=inst, response=resp)
+                    for inst, resp in zip(sample_instructions, sample_responses_list)
+                ]
+                judgments = mlx_generate_responses(judge_model, judge_tok, judge_prompts, max_new_tokens=60, temperature=0.0)
+            else:
+                logger.info("Batch judging %d responses (batch_size=%d)...", len(samples), args.batch_size)
+                sample_instructions = [s["instruction"] for s in samples]
+                sample_responses_list = [s["response"] for s in samples]
+                judgments = batch_judge_responses(
+                    judge_model, judge_tok, sample_instructions, sample_responses_list,
+                    device, args.batch_size
+                )
 
             scores = []
             for i, (s, raw) in enumerate(zip(samples, judgments)):
@@ -746,8 +757,12 @@ def main():
                 "scores": scores,
             }
 
-        del judge_model
-        if device.type == "mps":
+        if judge_model is not None:
+            del judge_model
+        if use_mlx:
+            import mlx.core as mx
+            mx.clear_cache()
+        elif not use_gguf and device.type == "mps":
             torch.mps.empty_cache()
 
     result = {

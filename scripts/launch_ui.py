@@ -8,8 +8,10 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -115,13 +117,25 @@ def _scan_datasets_cache(cache_root: Path) -> list[str]:
     return results
 
 
-def _scan_local_checkpoints(search_root: Path) -> list[str]:
-    """Return local directories that look like HF model checkpoints."""
+def _scan_local_checkpoints(search_root: Path, _max_depth: int = 5) -> list[str]:
+    """Return local directories that look like HF model checkpoints.
+
+    Bounded to _max_depth levels below search_root to avoid unbounded rglob
+    over the entire filesystem when search_root is the project directory.
+    """
     results = []
     if not search_root.exists():
         return results
     try:
-        for d in sorted(search_root.rglob("config.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        candidates = sorted(
+            (
+                p for p in search_root.rglob("config.json")
+                if len(p.relative_to(search_root).parts) <= _max_depth
+            ),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for d in candidates:
             parent = d.parent
             if _is_hf_model_dir(parent):
                 results.append(str(parent))
@@ -348,20 +362,74 @@ def poll_logs(current_log: str):
     except queue.Empty:
         pass
     new_log = current_log + "".join(lines)
-    return new_log, _run_status()
+    running = _proc is not None and _proc.poll() is None
+    frac, label = _parse_progress_from_log(new_log)
+    html = _progress_bar_html(frac, label, running=running)
+    # Same progress HTML mirrored to all tabs; status mirrored to dom_status too
+    status = _run_status()
+    return new_log, status, html, html, html, html, html, status
 
 
 def clear_logs():
     return "", _run_status()
 
 
-def launch_magpie(teacher, output_dir, n, batch_size, use_filter, target, offline):
+def _parse_progress_from_log(log_text: str) -> tuple[float, str]:
+    """Return (fraction 0–1, label) from the last progress indicator in log_text."""
+    # tqdm-style: "75%|████████|"
+    m = list(re.finditer(r'\b(\d{1,3})%\|', log_text))
+    if m:
+        pct = int(m[-1].group(1))
+        return pct / 100, f"{pct}%"
+    # "Step X/Y" or "step X/Y"
+    m = list(re.finditer(r'[Ss]tep\s+(\d+)\s*/\s*(\d+)', log_text))
+    if m:
+        x, y = int(m[-1].group(1)), int(m[-1].group(2))
+        return (x / y if y > 0 else 0.0), f"Step {x}/{y}"
+    # "Epoch X/Y"
+    m = list(re.finditer(r'[Ee]poch[:\s]+(\d+)\s*/\s*(\d+)', log_text))
+    if m:
+        x, y = int(m[-1].group(1)), int(m[-1].group(2))
+        return (x / y if y > 0 else 0.0), f"Epoch {x}/{y}"
+    # Bare "Progress: 45%"
+    m = list(re.finditer(r'[Pp]rogress[:\s]+(\d+)%', log_text))
+    if m:
+        pct = int(m[-1].group(1))
+        return pct / 100, f"{pct}%"
+    return 0.0, ""
+
+
+def _progress_bar_html(fraction: float, label: str, running: bool = True) -> str:
+    """Return an HTML snippet for a compact progress bar, or '' when idle."""
+    if not running and not label:
+        return ""
+    pct = max(0, min(100, int(fraction * 100)))
+    color = "#2563eb" if running else "#16a34a"
+    status = label or ("Running…" if running else "Done")
+    return (
+        '<div style="margin:4px 0 6px;">'
+        '<div style="display:flex;justify-content:space-between;font-size:11px;'
+        'color:#6b7280;margin-bottom:2px;">'
+        f'<span>{status}</span><span>{pct}%</span></div>'
+        '<div style="background:#e5e7eb;border-radius:3px;height:6px;overflow:hidden;">'
+        f'<div style="width:{pct}%;background:{color};height:6px;'
+        'border-radius:3px;transition:width 0.3s ease;"></div>'
+        '</div></div>'
+    )
+
+
+def launch_magpie(teacher, output_dir, n, batch_size, use_filter, target, offline,
+                  domain=None, backend="auto"):
+    """Launch magpie_synth.py. Pass domain= for specialized synthesis."""
     params: dict = {
         "output_dir": output_dir,
         "n": int(n),
         "batch_size": int(batch_size),
         "filter": use_filter,
+        "backend": backend,
     }
+    if domain:
+        params["domain"] = domain
     if teacher and teacher != "Qwen/Qwen2-1.5B-Instruct":
         params["teacher"] = teacher
     if use_filter and target and int(target) > 0:
@@ -370,6 +438,49 @@ def launch_magpie(teacher, output_dir, n, batch_size, use_filter, target, offlin
         params["offline"] = True
     cmd = _build_cmd("magpie_synth.py", params)
     return _start_proc(cmd)
+
+
+_DOMAINS_FILE = PROJECT_DIR / "configs" / "domain_prompts.json"
+
+
+def save_custom_domain(domain_id, label, description, system_prompts_text,
+                       min_resp_words, max_resp_words, min_d2,
+                       require_code, require_numbers):
+    """Write a new domain entry to configs/domain_prompts.json."""
+    domain_id = (domain_id or "").strip().lower().replace(" ", "_")
+    if not domain_id:
+        return "Error: Domain ID is required."
+
+    prompts = [line.strip() for line in system_prompts_text.splitlines() if line.strip()]
+    if not prompts:
+        return "Error: At least one system prompt is required."
+
+    try:
+        registry = {}
+        if _DOMAINS_FILE.exists():
+            with open(_DOMAINS_FILE) as f:
+                registry = json.load(f)
+
+        registry[domain_id] = {
+            "label":          (label or domain_id).strip(),
+            "description":    (description or "").strip(),
+            "system_prompts": prompts,
+            "filter": {
+                "min_resp_words":  int(min_resp_words),
+                "max_resp_words":  int(max_resp_words),
+                "min_d2":          round(float(min_d2), 3),
+                "require_code":    bool(require_code),
+                "require_numbers": bool(require_numbers),
+            },
+        }
+
+        _DOMAINS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_DOMAINS_FILE, "w") as f:
+            json.dump(registry, f, indent=2)
+
+        return f"Saved domain '{domain_id}' to configs/domain_prompts.json  ({len(prompts)} system prompts)."
+    except Exception as e:
+        return f"Error saving domain: {e}"
 
 
 def launch_filter(dataset, output_dir, target, min_response_words, min_distinct2, offline):
@@ -466,10 +577,11 @@ def launch_eval_benchmark(output_dir, checkpoint, student, n_sequences, batch_si
 # ---------------------------------------------------------------------------
 
 def build_ui():
-    teachers  = discover_teachers()
-    students  = discover_students()
-    datasets  = discover_datasets()
-    out_dirs  = discover_output_dirs()
+    # Discover once — reused by all tabs to avoid repeated filesystem scans.
+    teachers = discover_teachers()
+    students = discover_students()
+    datasets = discover_datasets()
+    out_dirs = discover_output_dirs()
 
     default_teacher = "Qwen/Qwen2-1.5B-Instruct"
     default_student = students[0] if students else "Qwen/Qwen2-0.5B-Instruct"
@@ -492,7 +604,7 @@ def build_ui():
                         info="SFT = teacher-label warmup.  MiniLLM = reverse-KL distillation.",
                     )
                     backend = gr.Radio(
-                        ["PyTorch", "MLX"], value="PyTorch",
+                        ["PyTorch", "MLX"], value="MLX",
                         label="Backend",
                         info="PyTorch/MPS = stable, full-featured.  MLX = Apple-native, 2-5× faster on M3.",
                     )
@@ -569,26 +681,28 @@ def build_ui():
                                                        label="Max sequence length")
 
                 # MiniLLM/PyTorch-specific
-                with gr.Group(visible=True) as minillm_group:
+                with gr.Group(visible=False) as minillm_group:
                     gr.Markdown("### MiniLLM options  (PyTorch / MPS)")
                     with gr.Row():
                         minillm_temp          = gr.Slider(0.5, 2.0, value=1.0, step=0.1,
                                                            label="KD temperature")
                         minillm_lr            = gr.Number(value=2e-5, label="Learning rate",
                                                            precision=6)
-                        num_generations       = gr.Slider(2, 16, value=2, step=1,
-                                                           label="Generations per prompt")
-                        max_completion_length = gr.Slider(64, 512, value=128, step=32,
-                                                           label="Max completion length (tokens)")
+                        num_generations       = gr.Slider(2, 16, value=4, step=1,
+                                                           label="Generations per prompt",
+                                                           info="4+ gives GRPO enough reward variance for non-zero advantage")
+                        max_completion_length = gr.Slider(64, 512, value=256, step=32,
+                                                           label="Max completion length (tokens)",
+                                                           info="256 gives completions room to terminate naturally; update _MAX_NATURAL_CHARS if changed")
                         eval_steps            = gr.Slider(1, 50, value=20, step=1,
                                                            label="Eval every N steps")
 
                 # MLX-specific
-                with gr.Group(visible=False) as mlx_group:
+                with gr.Group(visible=True) as mlx_group:
                     gr.Markdown("### MLX options  (Apple-native, 2-5× faster on M3)")
                     gr.Markdown(
-                        "_MLX uses lower batch defaults (batch=2, grad_acc=4, lora_r=8). "
-                        "Adjust the sliders above after switching._"
+                        "_MLX uses Apple-optimised defaults (batch=2, grad_acc=8, lora_r=16). "
+                        "Teacher logits are precomputed once then freed — both models never in memory together._"
                     )
                     with gr.Row():
                         mlx_kd_temp   = gr.Slider(0.5, 2.0, value=1.0, step=0.1,
@@ -597,10 +711,12 @@ def build_ui():
                         mlx_eval_steps = gr.Slider(1, 100, value=50, step=1,
                                                     label="Eval every N steps")
                     with gr.Row():
-                        mlx_ce_alpha  = gr.Slider(0.0, 1.0, value=0.1, step=0.05,
-                                                   label="CE alpha (0=pure KD, 1=pure CE)")
+                        mlx_ce_alpha  = gr.Slider(0.0, 1.0, value=0.2, step=0.05,
+                                                   label="CE alpha (0=pure KD, 1=pure CE)",
+                                                   info="0.2 mixes CE for stability without losing KD signal")
                         mlx_topk      = gr.Slider(10, 200, value=50, step=10,
-                                                   label="Top-K teacher logits")
+                                                   label="Top-K teacher logits",
+                                                   info="50 captures >99% of teacher probability mass (~300 MB vs ~300 GB full vocab)")
                         mlx_q_bits    = gr.Radio([4, 8], value=4, label="Export quantization bits")
                         mlx_resume    = gr.Checkbox(value=False,
                                                     label="Resume from last checkpoint")
@@ -613,9 +729,11 @@ def build_ui():
                     stop_btn   = gr.Button("Stop",   variant="stop",    scale=1)
 
                 run_status = gr.Textbox(value="idle", label="Run status", interactive=False)
+                launch_progress = gr.HTML(value="")
 
             # ── Tab 2: Data Prep ─────────────────────────────────────────────
             with gr.Tab("Data Prep"):
+                data_prep_progress = gr.HTML(value="")
 
                 # ── Magpie synthesis ─────────────────────────────────────────
                 gr.Markdown("### Magpie Synthesis")
@@ -626,7 +744,7 @@ def build_ui():
                 )
                 with gr.Row():
                     mag_teacher = gr.Dropdown(
-                        choices=discover_teachers(),
+                        choices=teachers,
                         value="Qwen/Qwen2-1.5B-Instruct",
                         label="Teacher model",
                         allow_custom_value=True,
@@ -642,12 +760,18 @@ def build_ui():
                 with gr.Row():
                     mag_n          = gr.Slider(500, 50000, value=5000, step=500,
                                                label="Pairs to generate (before filtering)")
-                    mag_batch_size = gr.Slider(1, 32, value=8, step=1,
-                                               label="Generation batch size")
+                    mag_batch_size = gr.Slider(1, 64, value=32, step=1,
+                                               label="Generation batch size",
+                                               info="For MLX this is loop chunk size (generation is sequential but fast)")
                 with gr.Row():
-                    mag_filter = gr.Checkbox(value=True, label="Filter output (dedup + quality)")
-                    mag_target = gr.Slider(500, 20000, value=2000, step=500,
-                                           label="Target keep (top-N after filter)")
+                    mag_backend = gr.Radio(
+                        ["auto", "mlx", "mps"], value="auto",
+                        label="Backend",
+                        info="auto picks MLX on Apple Silicon (2-4× faster than MPS)",
+                    )
+                    mag_filter  = gr.Checkbox(value=True, label="Filter output (dedup + quality)")
+                    mag_target  = gr.Slider(500, 20000, value=2000, step=500,
+                                            label="Target keep (top-N after filter)")
                     mag_offline = gr.Checkbox(value=False, label="Offline (use cached model)")
                 with gr.Row():
                     mag_launch_btn = gr.Button("Generate", variant="primary", scale=3)
@@ -666,7 +790,7 @@ def build_ui():
                 )
                 with gr.Row():
                     synth_teacher = gr.Dropdown(
-                        choices=discover_teachers(),
+                        choices=teachers,
                         value="Qwen/Qwen2-1.5B-Instruct",
                         label="Teacher model",
                         allow_custom_value=True,
@@ -707,7 +831,7 @@ def build_ui():
                 )
                 with gr.Row():
                     filt_dataset = gr.Dropdown(
-                        choices=discover_datasets(),
+                        choices=datasets,
                         value="yahma/alpaca-cleaned",
                         label="Dataset",
                         allow_custom_value=True,
@@ -733,7 +857,224 @@ def build_ui():
                     filt_stop_btn   = gr.Button("Stop", variant="stop", scale=1)
                 filt_status = gr.Textbox(value="idle", label="Status", interactive=False)
 
-            # ── Tab 3: Eval ──────────────────────────────────────────────────
+            # ── Tab 3: Specialized Domain Synthesis ──────────────────────────
+            with gr.Tab("Domain Synthesis"):
+                gr.Markdown("# Specialized Domain Synthesis")
+                gr.Markdown(
+                    "Generate high-quality domain-focused instruction-response pairs using "
+                    "Magpie-style self-synthesis. Each domain uses curated system prompts and "
+                    "domain-appropriate quality filters (e.g. coding requires code blocks, "
+                    "math/tax require numbers). Output is an HF dataset ready for distillation."
+                )
+
+                # ── Shared domain controls ────────────────────────────────────
+                with gr.Row():
+                    dom_teacher = gr.Dropdown(
+                        choices=teachers,
+                        value="Qwen/Qwen2-1.5B-Instruct",
+                        label="Teacher model",
+                        allow_custom_value=True,
+                        scale=4,
+                        info="Larger teacher = richer domain knowledge. Qwen2-1.5B works well for all domains.",
+                    )
+                    dom_refresh_btn = gr.Button("Refresh", scale=1, size="sm")
+                with gr.Row():
+                    dom_backend = gr.Radio(
+                        ["auto", "mlx", "mps"], value="auto",
+                        label="Backend",
+                        info="auto picks MLX on Apple Silicon (2-4× faster than MPS)",
+                    )
+                    dom_offline = gr.Checkbox(value=False, label="Offline (use cached model)")
+                    dom_filter  = gr.Checkbox(value=True,  label="Deep filter output (dedup + quality)")
+                    dom_batch   = gr.Slider(1, 64, value=32, step=1, label="Batch size",
+                                            info="For MLX: loop chunk size only (sequential gen). For MPS: reduce to 4-8 if OOM.")
+
+                dom_status = gr.Textbox(value="idle", label="Status", interactive=False)
+                domain_progress = gr.HTML(value="")
+
+                gr.Markdown("---")
+
+                # ── Medical ───────────────────────────────────────────────────
+                with gr.Accordion("🏥  Medical", open=False):
+                    gr.Markdown(
+                        "Generates clinical education Q&A: symptoms, diagnosis reasoning, pharmacology, "
+                        "pathophysiology, anatomy, public health, and medical ethics. "
+                        "**Filter:** responses ≥40 words, distinct-2 ≥0.30. "
+                        "Output tagged `domain=medical` for easy mixing with other datasets."
+                    )
+                    with gr.Row():
+                        med_n      = gr.Slider(500, 20000, value=3000, step=500,
+                                               label="Pairs to generate (before filter)")
+                        med_target = gr.Slider(200, 10000, value=1500, step=200,
+                                               label="Target keep after filter")
+                        med_outdir = gr.Textbox(
+                            value=str(PROJECT_DIR / "domain_data" / "medical"),
+                            label="Output directory", scale=3,
+                        )
+                    med_btn = gr.Button("Generate Medical Dataset", variant="primary")
+
+                # ── Math ──────────────────────────────────────────────────────
+                with gr.Accordion("📐  Mathematics", open=False):
+                    gr.Markdown(
+                        "Generates math problem-solution pairs: calculus, linear algebra, statistics, "
+                        "discrete math, number theory, and competition math. "
+                        "**Filter:** response must contain at least one number/equation, distinct-2 ≥0.25."
+                    )
+                    with gr.Row():
+                        math_n      = gr.Slider(500, 20000, value=3000, step=500,
+                                                label="Pairs to generate (before filter)")
+                        math_target = gr.Slider(200, 10000, value=1500, step=200,
+                                                label="Target keep after filter")
+                        math_outdir = gr.Textbox(
+                            value=str(PROJECT_DIR / "domain_data" / "math"),
+                            label="Output directory", scale=3,
+                        )
+                    math_btn = gr.Button("Generate Math Dataset", variant="primary")
+
+                # ── Legal ─────────────────────────────────────────────────────
+                with gr.Accordion("⚖️  Legal / Law", open=False):
+                    gr.Markdown(
+                        "Generates legal education Q&A: contracts, torts, constitutional law, criminal law, "
+                        "property, corporate, IP, civil procedure, and legal reasoning. "
+                        "**Filter:** responses ≥50 words (legal explanations are inherently longer), distinct-2 ≥0.30. "
+                        "All outputs include an educational disclaimer."
+                    )
+                    with gr.Row():
+                        legal_n      = gr.Slider(500, 20000, value=3000, step=500,
+                                                 label="Pairs to generate (before filter)")
+                        legal_target = gr.Slider(200, 10000, value=1500, step=200,
+                                                 label="Target keep after filter")
+                        legal_outdir = gr.Textbox(
+                            value=str(PROJECT_DIR / "domain_data" / "legal"),
+                            label="Output directory", scale=3,
+                        )
+                    legal_btn = gr.Button("Generate Legal Dataset", variant="primary")
+
+                # ── Tax ───────────────────────────────────────────────────────
+                with gr.Accordion("🧾  Tax / IRS", open=False):
+                    gr.Markdown(
+                        "Generates U.S. tax education Q&A: individual filing, business taxes, capital gains, "
+                        "retirement accounts, self-employment, SALT, estate/gift tax, and audits. "
+                        "**Filter:** responses ≥40 words, must contain numbers (tax rules involve figures), "
+                        "distinct-2 ≥0.28."
+                    )
+                    with gr.Row():
+                        tax_n      = gr.Slider(500, 20000, value=3000, step=500,
+                                               label="Pairs to generate (before filter)")
+                        tax_target = gr.Slider(200, 10000, value=1500, step=200,
+                                               label="Target keep after filter")
+                        tax_outdir = gr.Textbox(
+                            value=str(PROJECT_DIR / "domain_data" / "tax"),
+                            label="Output directory", scale=3,
+                        )
+                    tax_btn = gr.Button("Generate Tax Dataset", variant="primary")
+
+                # ── Coding ────────────────────────────────────────────────────
+                with gr.Accordion("💻  Coding / Programming", open=False):
+                    gr.Markdown(
+                        "Generates programming Q&A with working code: Python, JavaScript, C/C++, Rust, Go, "
+                        "SQL, shell scripting, algorithms, ML engineering, DevOps, and API design. "
+                        "**Filter:** response must contain at least one code fence (``` block or inline `code`), "
+                        "distinct-2 ≥0.20 (code is naturally repetitive)."
+                    )
+                    with gr.Row():
+                        code_n      = gr.Slider(500, 20000, value=4000, step=500,
+                                                label="Pairs to generate (before filter)",
+                                                info="Generate more — code filter is stricter (~30-40% pass rate)")
+                        code_target = gr.Slider(200, 10000, value=2000, step=200,
+                                                label="Target keep after filter")
+                        code_outdir = gr.Textbox(
+                            value=str(PROJECT_DIR / "domain_data" / "coding"),
+                            label="Output directory", scale=3,
+                        )
+                    code_btn = gr.Button("Generate Coding Dataset", variant="primary")
+
+                # ── Finance ───────────────────────────────────────────────────
+                with gr.Accordion("💰  Finance / Investing", open=False):
+                    gr.Markdown(
+                        "Generates finance education Q&A: personal finance, investing, corporate finance, "
+                        "derivatives, fixed income, macroeconomics, risk management, and financial modeling. "
+                        "**Filter:** responses ≥30 words, must contain numbers (finance involves figures), "
+                        "distinct-2 ≥0.28."
+                    )
+                    with gr.Row():
+                        fin_n      = gr.Slider(500, 20000, value=3000, step=500,
+                                               label="Pairs to generate (before filter)")
+                        fin_target = gr.Slider(200, 10000, value=1500, step=200,
+                                               label="Target keep after filter")
+                        fin_outdir = gr.Textbox(
+                            value=str(PROJECT_DIR / "domain_data" / "finance"),
+                            label="Output directory", scale=3,
+                        )
+                    fin_btn = gr.Button("Generate Finance Dataset", variant="primary")
+
+                # ── Custom Domain Builder ─────────────────────────────────
+                with gr.Accordion("✏️  Custom Domain Builder", open=False):
+                    gr.Markdown(
+                        "Define a new domain with custom system prompts and quality filters. "
+                        "**Save** writes it to `configs/domain_prompts.json` so it persists across sessions "
+                        "and is immediately available to all domain synthesis tools."
+                    )
+                    with gr.Row():
+                        custom_id    = gr.Textbox(label="Domain ID",
+                                                   placeholder="e.g. chemistry  (lowercase, no spaces)",
+                                                   scale=2)
+                        custom_label = gr.Textbox(label="Display label",
+                                                   placeholder="e.g. Chemistry / Science",
+                                                   scale=3)
+                    custom_desc = gr.Textbox(
+                        label="Description (shown in UI, optional)",
+                        placeholder="Chemistry Q&A: reactions, periodic table, organic/inorganic, lab safety.",
+                        lines=2,
+                    )
+                    custom_prompts = gr.Textbox(
+                        label="System prompts — one per line (at least 1 required)",
+                        placeholder=(
+                            "You are a chemistry educator explaining reactions clearly.\n"
+                            "You are an organic chemistry tutor covering nomenclature and mechanisms.\n"
+                            "You are a physical chemistry instructor discussing thermodynamics and kinetics."
+                        ),
+                        lines=6,
+                    )
+                    gr.Markdown("**Quality filter settings**")
+                    with gr.Row():
+                        custom_min_words  = gr.Slider(5, 100, value=20, step=5,
+                                                      label="Min response words")
+                        custom_max_words  = gr.Slider(100, 2000, value=600, step=50,
+                                                      label="Max response words")
+                        custom_min_d2     = gr.Slider(0.10, 0.60, value=0.30, step=0.05,
+                                                      label="Min distinct-2")
+                    with gr.Row():
+                        custom_req_code   = gr.Checkbox(value=False,
+                                                        label="Require code block (``` or inline `code`)")
+                        custom_req_nums   = gr.Checkbox(value=False,
+                                                        label="Require numbers in response")
+                    custom_save_status = gr.Textbox(value="", label="Save status", interactive=False)
+                    with gr.Row():
+                        custom_save_btn = gr.Button("Save Domain", variant="secondary", scale=2)
+
+                    gr.Markdown("**Generate with custom domain** (saves first if domain is new)")
+                    with gr.Row():
+                        custom_n      = gr.Slider(500, 20000, value=3000, step=500,
+                                                  label="Pairs to generate")
+                        custom_target = gr.Slider(200, 10000, value=1500, step=200,
+                                                  label="Target keep after filter")
+                        custom_outdir = gr.Textbox(
+                            value=str(PROJECT_DIR / "domain_data" / "custom"),
+                            label="Output directory", scale=3,
+                        )
+                    custom_launch_btn = gr.Button("Save & Generate", variant="primary")
+
+                gr.Markdown("---")
+                gr.Markdown(
+                    "### After generation\n"
+                    "Point the **Dataset** field in **Configure & Launch** at the output directory "
+                    "(e.g. `domain_data/coding/hf_dataset`) and launch distillation normally. "
+                    "You can also merge multiple domain datasets using `datasets.concatenate_datasets()` "
+                    "before distillation for a multi-domain specialist model."
+                )
+
+            # ── Tab 4: Eval ──────────────────────────────────────────────────
             with gr.Tab("Eval"):
                 gr.Markdown(
                     "Post-training evaluation. All evals write results to the model's output dir. "
@@ -742,9 +1083,8 @@ def build_ui():
 
                 # Shared eval inputs
                 with gr.Row():
-                    eval_out_dirs = discover_output_dirs()
                     eval_output_dir = gr.Dropdown(
-                        choices=eval_out_dirs,
+                        choices=out_dirs,
                         value=default_out,
                         label="Model output dir",
                         allow_custom_value=True,
@@ -775,6 +1115,7 @@ def build_ui():
                     )
                 with gr.Row():
                     eval_offline = gr.Checkbox(value=False, label="Offline")
+                eval_progress = gr.HTML(value="")
 
                 gr.Markdown("---")
 
@@ -859,6 +1200,7 @@ def build_ui():
 
             # ── Tab 4: Live Logs ─────────────────────────────────────────────
             with gr.Tab("Live Logs"):
+                training_progress = gr.HTML(value="")
                 log_box = gr.Textbox(
                     value="",
                     label="Output",
@@ -874,32 +1216,62 @@ def build_ui():
             with gr.Tab("Help"):
                 gr.Markdown("# Distillation Launcher — Operation Guide")
                 gr.Markdown(
-                    "Complete reference for all tabs. Click a section to expand it. "
-                    "**Recommended first-run order:** Data Prep (optional) → Configure & Launch (SFT) "
-                    "→ Configure & Launch (MiniLLM) → Eval."
+                    "Six tabs: **Configure & Launch** · **Data Prep** · **Domain Synthesis** · "
+                    "**Eval** · **Live Logs** · **Help**. "
+                    "A progress bar appears on every tab — no need to switch to Live Logs to monitor a run. "
+                    "Click a section below to expand it."
                 )
 
-                # ── End-to-end workflow ──────────────────────────────────────
-                with gr.Accordion("End-to-End Pipeline Overview", open=True):
+                # ── Golden pipeline ──────────────────────────────────────────
+                with gr.Accordion("🏆  Golden Pipeline — Recommended End-to-End Sequence", open=True):
                     gr.Markdown("""
-### Quickstart (open models, no login)
-1. Go to **Configure & Launch**, select stage **MiniLLM**, backend **PyTorch**, check **Use open Qwen2 models**.
-2. Leave all defaults. Click **Launch**. Training runs ~1–2 hours on M3 Max.
-3. Go to **Eval** → **Run Perplexity Eval** to verify the distilled model.
-4. The merged model is saved to `Output directory/` and is ready to export to GGUF or CoreML.
+```
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║                        GOLDEN PIPELINE  (best quality)                         ║
+╠════╦═══════════════════════╦══════════════════════════════════════════╦═════════╣
+║ 1  ║ Data Prep  (optional) ║ Filter dataset or run Magpie synthesis   ║  5–30 m ║
+║ 2  ║ Domain Synth (opt.)   ║ Generate domain pairs: code/math/legal/… ║ 30–90 m ║
+║ 3  ║ Configure & Launch    ║ Stage: SFT · 1 epoch → sft_checkpoint    ║  ~30 m  ║
+║ 4  ║ Configure & Launch    ║ Stage: MiniLLM · Student=sft_checkpoint  ║   ~2 h  ║
+║ 5  ║ Eval                  ║ Perplexity → Quality → WikiText-2        ║  ~15 m  ║
+║ 6  ║ Terminal              ║ export_student_gguf.sh → GGUF            ║   ~5 m  ║
+╚════╩═══════════════════════╩══════════════════════════════════════════╩═════════╝
+```
 
-### Full curriculum pipeline (best quality)
-```
-[Data Prep]  Filter or synthesize a curated dataset
-     ↓
-[Launch: SFT]       Student learns format from teacher labels (1 epoch, ~30 min)
-     ↓
-[Launch: MiniLLM]   Reverse-KL distillation from SFT checkpoint (2 epochs, ~2 hr)
-     ↓
-[Eval]              Perplexity + Quality + WikiText-2 benchmark
-```
-- Point the MiniLLM **Student** field at the SFT checkpoint (`distilled-minillm/sft_checkpoint`).
-- SFT gives the student a good starting distribution so MiniLLM rewards don't start negative.
+**Steps 1–2 are optional** but significantly improve output quality. Step 3 (SFT) is strongly
+recommended before MiniLLM — it gives the student a warm start so GRPO rewards don't
+open negative and stay there.
+
+---
+
+### Quickstart (no HF login · ~2 hr)
+1. **Configure & Launch** → Stage: **MiniLLM** · Backend: **MLX** (default) · ☑ **Use open Qwen2 models** → **Launch**
+2. Watch the progress bar on the same tab. Switch to **Live Logs** for the full output stream.
+3. **Eval** → Run Perplexity Eval once training completes.
+
+---
+
+### When to add SFT warmup (step 3)
+Run SFT first when any of these appear in Live Logs during MiniLLM:
+- `reward` stuck at −1.0 for more than 50 steps
+- `frac_reward_zero_std` > 0.5 after step 30 (all completions tie → no GRPO gradient)
+- You are using a new domain dataset the student hasn't seen before
+
+After SFT finishes, set the MiniLLM **Student** field to `distilled-minillm/sft_checkpoint`.
+
+---
+
+### Decision guide
+| Goal | Recommended path |
+|------|-----------------|
+| Fastest first result | Quickstart (skip steps 1–3) |
+| Best general quality | Full golden pipeline |
+| Domain specialist (coding / math / medical / legal / finance / tax) | Domain Synthesis → SFT → MiniLLM |
+| Fastest training on M-series Mac | Backend: **MLX**, batch=2, grad_acc=8 |
+| Largest pair that fits 36 GB unified memory | Teacher ≤ 3B + student ≤ 1B |
+| Resume an interrupted run | MLX: tick **Resume**; PyTorch: relaunch from latest checkpoint |
+
+---
 
 ### Outputs written to disk
 | File | Contents |
@@ -941,8 +1313,8 @@ def build_ui():
 | **Epochs** | 2 | SFT: 1 is usually enough. MiniLLM: 2–3. More can overfit on small datasets. |
 | **Max samples** | 2000 | Samples drawn from the dataset. 2000 trains in ~1–2 hours. Use 500 for a smoke test. |
 | **Batch size** | 8 (PyTorch), 2 (MLX) | Physical samples per device step. Increase until Activity Monitor shows ~80% GPU pressure. |
-| **Gradient accumulation** | 8 | Multiply by batch for effective batch (8×8 = 64). Larger effective batch = smoother gradients. |
-| **LoRA rank** | 16 (PyTorch), 8 (MLX) | Higher = more trainable params = slower but higher capacity. 16 is a good balance. 64 for SFT. |
+| **Gradient accumulation** | 8 | Multiply by batch for effective batch (8×8=64 PyTorch, 2×8=16 MLX). Larger effective batch = smoother gradients. |
+| **LoRA rank** | 16 | Higher = more trainable params = slower but higher capacity. 16 is a good balance for both backends. 64 for SFT. |
 
 ### SFT options
 | Parameter | Default | Guidance |
@@ -956,8 +1328,8 @@ def build_ui():
 |-----------|---------|----------|
 | **KD temperature** | 1.0 | Softens the teacher distribution. Higher (1.5–2.0) = smoother targets, can stabilize early training. |
 | **Learning rate** | 2e-5 | Intentionally 10× lower than SFT. Increase to 5e-5 only if rewards plateau after 100 steps. |
-| **Generations per prompt** | 2 | GRPO samples per prompt. 2 = faster, less advantage variance. 4 = richer signal but 2× slower. Keep at 2 on MPS. |
-| **Max completion length** | 128 | Hard cutoff for student generations. **Critical:** if too high, model hits the limit before EOS → clipped_ratio spikes → reward collapses. 128 tokens ≈ 430 characters. |
+| **Generations per prompt** | 4 | GRPO samples per prompt. **At least 4** to get reward variance within each group (fewer → frac_reward_zero_std stays high → no gradient). 8 gives richer signal but 2× slower. |
+| **Max completion length** | 256 | Hard cutoff for student generations. **Critical:** too small → model hits limit before EOS → 80%+ clipped_ratio → reward collapses. 256 tokens ≈ 800 characters is the calibrated default. |
 | **Eval every N steps** | 20 | Lower = more detail in metrics.jsonl, higher = faster overall run. 20 is a good balance. |
 
 ### MLX options
@@ -965,8 +1337,8 @@ def build_ui():
 |-----------|---------|----------|
 | **KD temperature** | 1.0 | Same as PyTorch. |
 | **Learning rate** | 2e-4 | MLX uses forward-KL + CE, not GRPO, so it tolerates a higher LR. |
-| **CE alpha** | 0.1 | Weight of cross-entropy (hard label) loss. 0 = pure KD, 1 = pure CE. 0.1 stabilises early training without losing KD signal. |
-| **Top-K teacher logits** | 50 | Keeps only top-50 teacher token probabilities. Captures >99% of probability mass while reducing logit memory from ~300 GB to ~300 MB per batch. |
+| **CE alpha** | 0.2 | Weight of cross-entropy (hard label) loss. 0 = pure KD, 1 = pure CE. 0.2 stabilises early training without losing KD signal (increased from 0.1 for better convergence). |
+| **Top-K teacher logits** | 50 | Keeps only top-50 teacher token probabilities. Captures >99% of probability mass while reducing logit memory from ~300 GB to ~300 MB per dataset. Teacher is freed from memory immediately after precompute. |
 | **Export quantization bits** | 4 | Bits for the MLX quantized export. 4-bit is standard for llama.cpp-compatible GGUF. |
 | **Resume** | off | Continue from the last epoch checkpoint in output_dir if a previous MLX run was interrupted. |
 
@@ -978,13 +1350,19 @@ Sends **SIGKILL** (immediate termination). The last saved checkpoint is preserve
 """)
 
                 # ── Tab 2 help ───────────────────────────────────────────────
-                with gr.Accordion("Data Prep — When and How to Use Each Tool", open=False):
+                with gr.Accordion("Data Prep & Domain Synthesis — When and How to Use Each Tool", open=False):
                     gr.Markdown("""
 ### When to use Data Prep
 Out-of-the-box datasets (Alpaca, Guanaco) work fine for quickstart runs. Use Data Prep when:
 - You want domain-specific data not in the standard datasets
 - Existing dataset quality is low (short responses, repetition, refusals)
 - You want to maximize distillation quality with teacher-generated data
+
+### Domain Synthesis (separate tab)
+For domain-specialist models (coding, math, medical, legal, finance, tax) use the
+**Domain Synthesis** tab instead of — or in addition to — the tools below. It runs
+Magpie synthesis with curated system prompts and domain-specific quality filters.
+Output: `domain_data/<domain>/hf_dataset/` — point **Dataset** here in Configure & Launch.
 
 ### Magpie Synthesis
 **What it does:** Loads the teacher model and repeatedly samples from it, conditioning on just the chat-template user-turn prefix. The model "auto-completes" realistic user instructions, then generates responses. No seed dataset needed.
@@ -1028,11 +1406,17 @@ Out-of-the-box datasets (Alpaca, Guanaco) work fine for quickstart runs. Use Dat
 | **Min distinct-2** | 0.35 is standard. Increase to 0.45 to keep only highly diverse responses. |
 | **Min response words** | 20 words eliminates one-liners. Increase to 30–40 for richer training signal. |
 
-### Combining tools (recommended workflow)
+### Combining tools (recommended data workflow)
 ```
-1. [Filter]         yahma/alpaca-cleaned  →  filtered_data/  (2-3 min)
-2. [Self-Instruct]  Generate 3000 pairs   →  distilled-minillm/synthetic_data/  (30-60 min)
-3. [Configure]      Dataset = filtered_data/  (or mix manually)
+General quality:
+  1. Filter        yahma/alpaca-cleaned  →  filtered_data/              (2–3 min)
+  2. Self-Instruct Generate 3000 pairs   →  synthetic_data/             (30–60 min)
+  3. Configure     Dataset = filtered_data/
+
+Domain specialist:
+  1. Domain Synth  coding / math / medical …  →  domain_data/<x>/      (30–90 min)
+  2. (Optional) mix with filtered general data using datasets.concatenate_datasets()
+  3. Configure     Dataset = domain_data/<x>/hf_dataset/
 ```
 """)
 
@@ -1110,10 +1494,13 @@ Evaluates the student on the **WikiText-2-raw-v1** test split — a standard ope
 """)
 
                 # ── Tab 4 help ───────────────────────────────────────────────
-                with gr.Accordion("Live Logs — Reading Training Output", open=False):
+                with gr.Accordion("Live Logs & Progress Bars — Reading Training Output", open=False):
                     gr.Markdown("""
+### Progress bars
+A compact progress bar appears **on every tab** (Configure & Launch, Data Prep, Domain Synthesis, Eval, and Live Logs). It updates every 2 seconds by parsing the accumulated log output for `Step X/Y`, `Epoch X/Y`, tqdm `75%|` patterns, or `Progress: N%`. The bar turns green when the job finishes. You do not need to switch to the Live Logs tab to see it.
+
 ### Log format
-Training output streams here in real time (polled every 2 seconds). Both stdout and stderr from the training process are merged.
+Full training output streams in the Live Logs tab in real time (polled every 2 seconds). Both stdout and stderr from the training process are merged here.
 
 ### Key metrics to watch (MiniLLM / GRPO)
 
@@ -1147,8 +1534,8 @@ Training output streams here in real time (polled every 2 seconds). Both stdout 
 - **`RuntimeError: Expected all tensors on same device`** — MPS + bfloat16 edge case. Usually resolves after a restart.
 - **`ImportError: trl`** — TRL not installed. Run `pixi run pip install trl`.
 - **`nan` in loss after step 1** — Learning rate too high. Reduce by 10×.
-- **Reward stuck at -0.5 from step 1** — All completions are clipping. Lower Max completion length to 64–96.
-- **`frac_reward_zero_std` never drops below 0.5** — Reduce Generations per prompt to 2.
+- **Reward stuck at -0.5 from step 1** — All completions are clipping. Increase Max completion length to 256+ so responses have room to terminate before the hard limit.
+- **`frac_reward_zero_std` > 0.6 after step 20** — All completions in a group get identical reward so GRPO advantage is zero. Increase Generations per prompt to 4–8.
 
 ### Thermal note
 On M3 Max, GPU temperature under MPS load typically stays at 50–60°C. If you see the machine throttling (iterations getting slower over time), training will continue correctly — the pause.flag watchdog can be used to cool it down without losing progress.
@@ -1201,8 +1588,15 @@ Default: `~/.cache/huggingface/hub/`. Set `HF_HOME` environment variable to redi
 ### Q: How do I use a locally downloaded GGUF model?
 GGUFs are for inference only (llama.cpp / Ollama), not training. The training scripts use HF-format models. The pipeline exports to GGUF *after* training via `scripts/export_student_gguf.sh`.
 
+### Q: The progress bar shows 0% but a run is active
+The bar parses `Step X/Y`, `Epoch X/Y`, or tqdm `N%|` from the log. Scripts that don't emit
+those patterns (e.g. model download phase) show 0% until the first progress line appears.
+The Run status textbox ("running (pid …)") confirms the process is alive regardless.
+
 ### Q: The UI shows "idle" but I launched a run
 Check **Live Logs** tab — the process may have crashed immediately. The status polling updates every 2 seconds.
+Also check: if you launched from a tab other than Configure & Launch, only that tab's status textbox
+updates on click; all tabs' progress bars update via the timer once the process writes output.
 """)
 
         # ── Stage / backend toggle ────────────────────────────────────────────
@@ -1216,14 +1610,14 @@ Check **Live Logs** tab — the process may have crashed immediately. The status
 
         def on_backend_change(b):
             is_mlx = b == "MLX"
-            # Also suggest different common-param defaults for MLX
+            # Suggest backend-appropriate defaults for batch/grad_acc/lora_r
             if is_mlx:
                 return (
                     gr.update(visible=False),  # minillm_group
                     gr.update(visible=True),   # mlx_group
                     gr.update(value=2),        # batch_size
-                    gr.update(value=4),        # grad_acc
-                    gr.update(value=8),        # lora_r
+                    gr.update(value=8),        # grad_acc (effective batch=16; higher than PyTorch default since MLX is more memory-efficient)
+                    gr.update(value=16),       # lora_r (same capacity as PyTorch default)
                 )
             else:
                 return (
@@ -1276,6 +1670,64 @@ Check **Live Logs** tab — the process may have crashed immediately. The status
         stop_btn.click(fn=stop_run, outputs=[log_box, run_status])
         clear_btn.click(fn=clear_logs, outputs=[log_box, log_status])
 
+        # ── Domain synthesis wiring ──────────────────────────────────────────
+        dom_refresh_btn.click(
+            fn=lambda: gr.update(choices=discover_teachers()), outputs=dom_teacher,
+        )
+        # Wire each domain button with a closure capturing the domain name
+        for _domain, _btn, _n_slider, _target_slider, _outdir_box in [
+            ("medical", med_btn,   med_n,   med_target,   med_outdir),
+            ("math",    math_btn,  math_n,  math_target,  math_outdir),
+            ("legal",   legal_btn, legal_n, legal_target, legal_outdir),
+            ("tax",     tax_btn,   tax_n,   tax_target,   tax_outdir),
+            ("coding",  code_btn,  code_n,  code_target,  code_outdir),
+            ("finance", fin_btn,   fin_n,   fin_target,   fin_outdir),
+        ]:
+            def _make_handler(d):
+                def _handler(teacher, n, batch, use_filter, target, outdir, offline, backend):
+                    return launch_magpie(teacher, outdir, n, batch, use_filter, target, offline,
+                                        domain=d, backend=backend)
+                return _handler
+
+            _btn.click(
+                fn=_make_handler(_domain),
+                inputs=[dom_teacher, _n_slider, dom_batch, dom_filter, _target_slider,
+                        _outdir_box, dom_offline, dom_backend],
+                outputs=[log_box, dom_status],
+            )
+
+        # ── Custom domain wiring ─────────────────────────────────────────────
+        _custom_filter_inputs = [
+            custom_id, custom_label, custom_desc, custom_prompts,
+            custom_min_words, custom_max_words, custom_min_d2,
+            custom_req_code, custom_req_nums,
+        ]
+        custom_save_btn.click(
+            fn=save_custom_domain,
+            inputs=_custom_filter_inputs,
+            outputs=custom_save_status,
+        )
+
+        def _save_and_launch(domain_id, label, desc, prompts_text,
+                             min_words, max_words, min_d2, req_code, req_nums,
+                             teacher, n, batch, use_filter, target, outdir, offline, backend="auto"):
+            # Derive the sanitized domain ID the same way save_custom_domain does
+            did = (domain_id or "").strip().lower().replace(" ", "_") or "custom"
+            save_msg = save_custom_domain(domain_id, label, desc, prompts_text,
+                                         min_words, max_words, min_d2, req_code, req_nums)
+            if save_msg.startswith("Error"):
+                return save_msg, "idle"
+            log_msg, status = launch_magpie(teacher, outdir, n, batch, use_filter, target, offline,
+                                            domain=did, backend=backend)
+            return log_msg, status
+
+        custom_launch_btn.click(
+            fn=_save_and_launch,
+            inputs=_custom_filter_inputs + [dom_teacher, custom_n, dom_batch, dom_filter,
+                                            custom_target, custom_outdir, dom_offline, dom_backend],
+            outputs=[log_box, dom_status],
+        )
+
         # ── Data Prep wiring ─────────────────────────────────────────────────
         mag_refresh_btn.click(
             fn=lambda: gr.update(choices=discover_teachers()), outputs=mag_teacher,
@@ -1289,7 +1741,7 @@ Check **Live Logs** tab — the process may have crashed immediately. The status
         mag_launch_btn.click(
             fn=launch_magpie,
             inputs=[mag_teacher, mag_output_dir, mag_n, mag_batch_size,
-                    mag_filter, mag_target, mag_offline],
+                    mag_filter, mag_target, mag_offline, mag_backend],
             outputs=[log_box, mag_status],
         )
         mag_stop_btn.click(fn=stop_run, outputs=[log_box, mag_status])
@@ -1338,7 +1790,14 @@ Check **Live Logs** tab — the process may have crashed immediately. The status
         gr.Timer(value=2).tick(
             fn=poll_logs,
             inputs=log_box,
-            outputs=[log_box, log_status],
+            outputs=[
+                log_box, log_status, training_progress,  # Live Logs tab
+                launch_progress,    # Configure & Launch tab
+                data_prep_progress, # Data Prep tab
+                domain_progress,    # Domain Synthesis tab
+                eval_progress,      # Eval tab
+                dom_status,         # Domain Synthesis status
+            ],
         )
 
     return demo

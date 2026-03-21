@@ -36,7 +36,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(__file__))
-from data_pipeline import load_dataset_split, _extract_pair
+from data_pipeline import load_dataset_split, _extract_pair, distinct2, is_refusal, is_noise
 
 # ── Filter thresholds ────────────────────────────────────────────────────────
 MIN_INSTRUCTION_WORDS = 5
@@ -48,20 +48,6 @@ MAX_RESPONSE_WORDS = 600
 MIN_DISTINCT2 = 0.35       # distinct-2 on response (filters repetitive/degenerate)
 JACCARD_DEDUP_THRESHOLD = 0.6   # n-gram Jaccard; instructions above this are near-dups
 
-REFUSAL_PATTERNS = [
-    r"(?i)I(?:'m| am) sorry,?\s+(?:but\s+)?I (?:can'?t|cannot|am unable to)",
-    r"(?i)I (?:can'?t|cannot) (?:help|assist|provide|do)",
-    r"(?i)As an AI(?: language model| assistant)?,?\s+I (?:can'?t|cannot|don't|do not)",
-    r"(?i)I'?m not (?:able|allowed|programmed) to",
-    r"(?i)I don'?t have (?:the ability|access|permission)",
-    r"(?i)I cannot (and will not|fulfil)",
-]
-
-NOISE_PATTERNS = [
-    r"(?i)^\s*N/?A\s*$",           # bare "N/A" responses
-    r"(?i)^\s*none\.?\s*$",        # bare "None"
-    r"(?i)^\s*I don'?t know\.?\s*$",
-]
 
 TASK_VERBS = {
     "explain", "describe", "compare", "analyze", "list", "write", "create",
@@ -71,13 +57,6 @@ TASK_VERBS = {
 }
 QUESTION_WORDS = {"what", "why", "how", "when", "where", "who", "which"}
 
-
-def distinct2(text: str) -> float:
-    tokens = text.lower().split()
-    bigrams = list(zip(tokens, tokens[1:]))
-    if not bigrams:
-        return 0.0
-    return len(set(bigrams)) / len(bigrams)
 
 
 def ngrams(tokens: list, n: int) -> set:
@@ -93,19 +72,6 @@ def jaccard(a: str, b: str, n: int = 3) -> float:
         return 0.0
     return len(na & nb) / len(na | nb)
 
-
-def is_refusal(text: str) -> bool:
-    for p in REFUSAL_PATTERNS:
-        if re.search(p, text):
-            return True
-    return False
-
-
-def is_noise(text: str) -> bool:
-    for p in NOISE_PATTERNS:
-        if re.search(p, text):
-            return True
-    return False
 
 
 def score_example(instruction: str, response: str) -> float:
@@ -141,7 +107,9 @@ def score_example(instruction: str, response: str) -> float:
 # ── Parallel worker functions (module-level for ProcessPool pickling) ─────────
 
 def _filter_one(args):
-    """Pass 1 worker. Returns (reject_key, None) or (None, item_dict)."""
+    """Pass 1 worker. Returns (reject_key, None) or (None, item_dict).
+    Scoring is intentionally excluded — it runs as a separate pass only on
+    survivors and only when --target requires top-N selection."""
     ex, min_instr, max_instr, min_resp, max_resp, min_d2 = args
     instruction, response = _extract_pair(ex)
     if not instruction or not response:
@@ -162,19 +130,12 @@ def _filter_one(args):
         "instruction": instruction,
         "input": ex.get("input", "").strip() if hasattr(ex, "get") else "",
         "output": response,
-        "_score": score_example(instruction, response),
     }
 
 
-def _dup_check(args):
-    """Pass 2 worker. Returns True if item_ng is a near-dup of any set in window_ngs.
-    Operates on pre-computed frozenset n-grams — no string tokenization overhead."""
-    item_ng, window_ngs, threshold = args
-    for wng in window_ngs:
-        u = item_ng | wng
-        if u and len(item_ng & wng) / len(u) > threshold:
-            return True
-    return False
+def _score_one(item):
+    """Pass 3 worker: score a single already-filtered item."""
+    return score_example(item["instruction"], item["output"])
 
 
 def minhash_dedup(items: list, threshold: float, num_perm: int = 128) -> tuple[list, int] | None:
@@ -199,43 +160,63 @@ def minhash_dedup(items: list, threshold: float, num_perm: int = 128) -> tuple[l
     return kept, removed
 
 
-def score_with_teacher(items: list, teacher_id: str, batch_size: int = 1) -> list[float]:
+def score_with_teacher(items: list, teacher_id: str, batch_size: int = 8) -> list[float]:
     """
     Score each item by teacher NLL over the response given the prompt.
     Lower NLL = teacher assigns higher probability = better quality.
+    Uses batched forward passes — significantly faster than one-at-a-time.
     Loads teacher on MPS (M3 Max), unloads and clears cache when done.
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
-    logger.info("Loading teacher '%s' for scoring on %s ...", teacher_id, device)
+    logger.info("Loading teacher '%s' for scoring on %s (batch_size=%d)...",
+                teacher_id, device, batch_size)
 
     tok = AutoTokenizer.from_pretrained(teacher_id)
     if tok.pad_token_id is None:
         tok.pad_token_id = tok.eos_token_id
+    tok.padding_side = "right"  # right-padding keeps position 0 real for all items
+
     model = AutoModelForCausalLM.from_pretrained(
         teacher_id, torch_dtype=torch.float16
     ).to(device)
     model.eval()
 
     nlls = []
-    for idx, item in enumerate(items):
-        prompt_text = item["instruction"] + "\n\n### Response:\n"
-        full_text = prompt_text + item["output"]
-        p_ids = tok(prompt_text, return_tensors="pt", truncation=True, max_length=384)["input_ids"]
-        f_ids = tok(full_text, return_tensors="pt", truncation=True, max_length=512)["input_ids"]
-        p_len, f_len = p_ids.shape[1], f_ids.shape[1]
-        if f_len <= p_len + 2:
-            nlls.append(float("inf"))
-            continue
+    for batch_start in range(0, len(items), batch_size):
+        batch = items[batch_start : batch_start + batch_size]
+
+        prompt_texts = [item["instruction"] + "\n\n### Response:\n" for item in batch]
+        full_texts   = [pt + item["output"] for pt, item in zip(prompt_texts, batch)]
+
+        # Tokenize both prompt-only and full text with right-padding
+        p_enc = tok(prompt_texts, return_tensors="pt", padding=True,
+                    truncation=True, max_length=384)
+        f_enc = tok(full_texts,   return_tensors="pt", padding=True,
+                    truncation=True, max_length=512)
+
+        f_ids  = f_enc["input_ids"].to(device)
+        f_mask = f_enc["attention_mask"].to(device)
+
         with torch.no_grad():
-            logits = model(f_ids.to(device)).logits[0, p_len - 1: f_len - 1]
-        targets = f_ids[0, p_len:f_len].to(device)
-        nll = torch.nn.functional.cross_entropy(logits, targets).item()
-        nlls.append(nll)
-        if (idx + 1) % 200 == 0:
-            logger.info("Teacher scoring: %d / %d (last NLL=%.3f)", idx + 1, len(items), nll)
+            logits = model(f_ids, attention_mask=f_mask).logits  # (B, T, V)
+
+        for i in range(len(batch)):
+            # Real token counts (not counting right-padding)
+            p_len = int(p_enc["attention_mask"][i].sum())
+            f_len = int(f_enc["attention_mask"][i].sum())
+            if f_len <= p_len + 2:
+                nlls.append(float("inf"))
+                continue
+            # logits[i, p_len-1 : f_len-1] predicts tokens [p_len : f_len]
+            resp_logits = logits[i, p_len - 1 : f_len - 1].float()
+            targets     = f_ids[i, p_len : f_len]
+            nlls.append(torch.nn.functional.cross_entropy(resp_logits, targets).item())
+
+        if (batch_start // batch_size + 1) % 20 == 0:
+            logger.info("Teacher scoring: %d / %d", batch_start + len(batch), len(items))
 
     del model
     if torch.backends.mps.is_available():
@@ -265,8 +246,8 @@ def parse_args():
                    help="Re-rank top-N candidates by teacher log-probability (requires transformers)")
     p.add_argument("--teacher", type=str, default="Qwen/Qwen2-1.5B-Instruct",
                    help="Teacher model ID for --teacher_score (default: Qwen/Qwen2-1.5B-Instruct)")
-    p.add_argument("--teacher_batch_size", type=int, default=1,
-                   help="Batch size for teacher scoring forward passes (default: 1)")
+    p.add_argument("--teacher_batch_size", type=int, default=8,
+                   help="Batch size for teacher scoring forward passes (default: 8)")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true")
     p.add_argument("--workers", type=int, default=0,
@@ -337,6 +318,20 @@ def main():
     )
     stats["n_passed"] = len(passed)
 
+    # ── Pass 1b: score survivors (only when top-N heuristic selection is needed) ─
+    # Scoring runs only on examples that survived Pass 1 and only when --target is
+    # set without --teacher_score, saving work on filtered-out examples.
+    need_heuristic_score = bool(args.target and not args.teacher_score)
+    if need_heuristic_score:
+        with Pool(n_workers) as pool:
+            scores = list(pool.imap(_score_one, passed, chunksize=200))
+        for item, score in zip(passed, scores):
+            item["_score"] = score
+        logger.info("Pass 1b complete: scored %d survivors", len(passed))
+    else:
+        for item in passed:
+            item["_score"] = 0.0  # placeholder; not used
+
     # ── Pass 2: near-dedup ────────────────────────────────────────────────────
     if not args.no_dedup:
         deduped = None
@@ -358,40 +353,36 @@ def main():
 
         if deduped is None:  # sliding-window fallback
             # Pre-compute 3-gram frozensets once for all items.
-            # Avoids re-tokenizing each instruction O(N × window) times in the
-            # inner loop — ~5–10× cheaper than calling jaccard() directly.
             all_ngs = [
                 frozenset(ngrams(item["instruction"].lower().split(), 3))
                 for item in passed
             ]
             logger.info(
-                "Pass 2: parallel sliding-window Jaccard dedup "
-                "(threshold=%.2f, window=500, batch=256, workers=%d)...",
-                args.jaccard_threshold, n_workers,
+                "Pass 2: sliding-window Jaccard dedup "
+                "(threshold=%.2f, window=500)...",
+                args.jaccard_threshold,
             )
-            # Process candidates in batches. Each batch checks against a
-            # snapshot of the window taken before the batch starts, so items
-            # within the same batch don't de-dup against each other (minor
-            # approximation; acceptable for distillation data at this scale).
-            _DEDUP_BATCH = 256
+            # Single-process loop — faster than pool.map here because the
+            # pool approach serialises the full 500-item window_snap (~75 KB)
+            # once per task, producing hundreds of MB of IPC for typical
+            # datasets.  Frozenset intersection is C-speed; at N=50k this
+            # takes ~10 s in-process vs several minutes with pool overhead.
             deduped = []
             accepted_ngs: list = []
-            with Pool(n_workers) as pool:
-                for batch_start in range(0, len(passed), _DEDUP_BATCH):
-                    batch_end = min(batch_start + _DEDUP_BATCH, len(passed))
-                    batch_items = passed[batch_start:batch_end]
-                    batch_ngs = all_ngs[batch_start:batch_end]
-                    window_snap = accepted_ngs[-500:]   # snapshot before this batch
-                    dup_flags = pool.map(
-                        _dup_check,
-                        [(ng, window_snap, args.jaccard_threshold) for ng in batch_ngs],
-                    )
-                    for item, item_ng, is_dup in zip(batch_items, batch_ngs, dup_flags):
-                        if is_dup:
-                            stats["filtered_dedup"] += 1
-                        else:
-                            deduped.append(item)
-                            accepted_ngs.append(item_ng)
+            thresh = args.jaccard_threshold
+            for item, item_ng in zip(passed, all_ngs):
+                window = accepted_ngs[-500:]
+                is_dup = False
+                for wng in window:
+                    u = item_ng | wng
+                    if u and len(item_ng & wng) / len(u) > thresh:
+                        is_dup = True
+                        break
+                if is_dup:
+                    stats["filtered_dedup"] += 1
+                else:
+                    deduped.append(item)
+                    accepted_ngs.append(item_ng)
             logger.info(
                 "Pass 2 complete: %d / %d after dedup (removed %d near-dups)",
                 len(deduped), len(passed), stats["filtered_dedup"],

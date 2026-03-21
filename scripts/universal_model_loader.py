@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 
+from transformers import GenerationConfig
+
 LOG = logging.getLogger(__name__)
 
 
@@ -306,9 +308,12 @@ class UniversalModelLoader:
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_tokens,
-                do_sample=True,
-                temperature=temperature,
-                top_p=0.9
+                generation_config=GenerationConfig(
+                    do_sample=True,
+                    temperature=temperature,
+                    top_p=0.9,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                ),
             )
 
         # Decode only the generated part

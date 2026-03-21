@@ -7,6 +7,10 @@ Bare-metal, air-gapped. Works with BERT/DistilBERT etc.
 import argparse
 import os
 import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
 
 import torch
 import torch.nn.functional as F
@@ -18,6 +22,7 @@ from transformers import (
     TrainingArguments,
 )
 from torch.utils.data import Dataset
+from train_utils import get_device
 
 
 def parse_args():
@@ -35,11 +40,6 @@ def parse_args():
     p.add_argument("--watchdog", action="store_true", help="Enable pause.flag callback for watchdog")
     return p.parse_args()
 
-
-def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class DistillationTrainer(Trainer):

@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from data_pipeline import load_dataset_split, format_prompt_full, format_multiturn_full, pretokenize, validate_dataset_schema, DATASET_HELP
+from train_utils import check_pause_flag, write_metric
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(
@@ -134,27 +135,6 @@ def _check_mlx():
         return False
 
 
-def _check_pause_flag(output_dir: Path) -> bool:
-    """Return True if pause.flag exists (same protocol as PauseFlagCallback)."""
-    flag_path = output_dir / "pause.flag"
-    if not flag_path.exists():
-        return False
-    try:
-        with open(flag_path) as f:
-            info = json.load(f)
-        reason = info.get("reason", "unknown")
-    except (json.JSONDecodeError, OSError):
-        reason = "pause.flag"
-    LOG.info("pause.flag detected (reason=%s). Stopping.", reason)
-    return True
-
-
-def _write_metric(metrics_path: Path, step: int, epoch: float, **kwargs):
-    """Append a metrics row in the same format as MetricsCallback."""
-    row = {"step": step, "epoch": epoch, **kwargs}
-    with open(metrics_path, "a") as f:
-        f.write(json.dumps(row) + "\n")
-
 
 def _write_trainer_state(state_path: Path, log_history: list):
     """Write trainer_state.json in HuggingFace Trainer format.
@@ -193,6 +173,53 @@ def _scale_grads(g, scale):
     return g
 
 
+def _memory_safe_precomp_bs(requested_bs: int, seq_len: int, vocab_size: int) -> int:
+    """Return a precomp_bs that fits in Metal memory given current model occupancy.
+
+    After the teacher is loaded, measure how much Metal memory it occupies, then
+    budget the remainder for the logits + argsort temporaries (peak ≈ 3× one logits
+    tensor: input logits + sort indices + sorted values).
+    """
+    try:
+        import mlx.core as mx
+        info = mx.metal.device_info()
+        # recommendedMaxWorkingSetSize is the OS-blessed working-set ceiling.
+        # Fall back to 75% of total RAM if not reported.
+        recommended = info.get("recommendedMaxWorkingSetSize",
+                               int(info.get("memorySize", 0) * 0.75))
+        if recommended <= 0:
+            return requested_bs
+
+        # How much is already occupied by the loaded teacher model?
+        active_bytes = mx.metal.get_active_memory()   # returns int bytes
+        headroom = recommended - active_bytes
+        if headroom <= 0:
+            LOG.warning("Metal memory already at/above recommended limit before precompute "
+                        "(active=%.1f GB, limit=%.1f GB). Using precomp_bs=1.",
+                        active_bytes / 1e9, recommended / 1e9)
+            return 1
+
+        # Each logit batch: B × T × V × 4 bytes (float32).
+        # argsort creates a same-shape index tensor + a same-shape sorted-values tensor,
+        # so peak Metal allocation is ~3× one logit tensor.
+        bytes_per_sample = seq_len * vocab_size * 4
+        # Use 50% of headroom to leave room for stack/scratch; argsort peaks at 3×.
+        max_bs = max(1, int(headroom * 0.50) // (bytes_per_sample * 3))
+        if max_bs < requested_bs:
+            LOG.warning(
+                "Reducing precomp_bs %d → %d to fit in Metal memory "
+                "(model=%.1f GB, headroom=%.1f GB, peak/batch=%.2f GB, vocab=%d, seq=%d).",
+                requested_bs, max_bs,
+                active_bytes / 1e9, headroom / 1e9,
+                bytes_per_sample * 3 * requested_bs / 1e9,
+                vocab_size, seq_len,
+            )
+        return min(requested_bs, max_bs)
+    except Exception as e:
+        LOG.debug("Memory probe failed (%s); using requested precomp_bs=%d.", e, requested_bs)
+        return requested_bs
+
+
 def main():
     args = parse_args()
 
@@ -212,6 +239,15 @@ def main():
     import random as _random
     _random.seed(args.seed)
     mx.random.seed(args.seed)
+
+    # Pre-flight memory report so users can see available headroom before loading models.
+    try:
+        _minfo = mx.metal.device_info()
+        _total_gb = _minfo.get("memorySize", 0) / 1e9
+        _recommended_gb = _minfo.get("recommendedMaxWorkingSetSize", 0) / 1e9
+        LOG.info("Metal memory: total=%.0f GB  recommended_max=%.0f GB", _total_gb, _recommended_gb)
+    except Exception:
+        pass
 
     if args.open:
         args.teacher = OPEN_TEACHER
@@ -273,24 +309,43 @@ def main():
 
     # Use a larger batch for teacher precompute — no gradients means much lower memory pressure.
     # More samples per Metal dispatch → fewer CPU-GPU sync points → faster precompute.
-    # Auto: 4× training batch size, min 16, max 32 (caps logits tensor at ~4 GB for 128k-vocab models)
-    precomp_bs = args.precomp_bs if args.precomp_bs > 0 else min(max(args.batch_size * 4, 16), 32)
-    LOG.info("Pre-computing teacher top-%d logits for %d samples (precomp_bs=%d)...",
-             K, n_samples, precomp_bs)
-    for precomp_start in range(0, n_samples, precomp_bs):
-        precomp_end = min(precomp_start + precomp_bs, n_samples)
-        batch_ids = mx.array(all_input_ids[precomp_start:precomp_end])
-        t_out = teacher_model(batch_ids)
-        t_logits = t_out if isinstance(t_out, mx.array) else t_out.logits  # (B, T, V)
-        mx.eval(t_logits)
-        topk_idx = mx.argsort(-t_logits, axis=-1)[..., :K]           # (B, T, K)
-        topk_val = mx.take_along_axis(t_logits, topk_idx, axis=-1)   # (B, T, K)
-        mx.eval(topk_idx, topk_val)
-        all_teacher_topk_values[precomp_start:precomp_end] = np.array(topk_val.astype(mx.float32)).astype(np.float16)
-        all_teacher_topk_indices[precomp_start:precomp_end] = np.array(topk_idx.astype(mx.int32))
-        mx.clear_cache()  # free MLX intermediate buffers (logits, sort indices) after each batch
-        if precomp_end % max(precomp_bs * 10, 1) == 0 or precomp_end == n_samples:
-            LOG.info("  Teacher logits: %d/%d samples", precomp_end, n_samples)
+    # Auto: 4× training batch size, min 8, max 32; then capped by available Metal memory.
+    _initial_bs = args.precomp_bs if args.precomp_bs > 0 else min(max(args.batch_size * 4, 8), 32)
+    vocab_size = teacher_model.model.embed_tokens.weight.shape[0] if hasattr(
+        getattr(teacher_model, "model", None), "embed_tokens") else len(teacher_tokenizer)
+    precomp_bs = _memory_safe_precomp_bs(_initial_bs, seq_len, vocab_size)
+    LOG.info("Pre-computing teacher top-%d logits for %d samples (precomp_bs=%d, vocab=%d)...",
+             K, n_samples, precomp_bs, vocab_size)
+
+    # OOM-safe loop: halve precomp_bs and restart on Metal out-of-memory errors.
+    while precomp_bs >= 1:
+        try:
+            for precomp_start in range(0, n_samples, precomp_bs):
+                precomp_end = min(precomp_start + precomp_bs, n_samples)
+                batch_ids = mx.array(all_input_ids[precomp_start:precomp_end])
+                t_out = teacher_model(batch_ids)
+                t_logits = t_out if isinstance(t_out, mx.array) else t_out.logits  # (B, T, V)
+                mx.eval(t_logits)
+                topk_idx = mx.argsort(-t_logits, axis=-1)[..., :K]           # (B, T, K)
+                topk_val = mx.take_along_axis(t_logits, topk_idx, axis=-1)   # (B, T, K)
+                mx.eval(topk_idx, topk_val)
+                all_teacher_topk_values[precomp_start:precomp_end] = np.array(topk_val.astype(mx.float32)).astype(np.float16)
+                all_teacher_topk_indices[precomp_start:precomp_end] = np.array(topk_idx.astype(mx.int32))
+                mx.clear_cache()  # free MLX intermediate buffers after each batch
+                if precomp_end % max(precomp_bs * 10, 1) == 0 or precomp_end == n_samples:
+                    LOG.info("  Teacher logits: %d/%d samples", precomp_end, n_samples)
+            break  # completed successfully
+        except RuntimeError as e:
+            if "OutOfMemory" in str(e) or "Insufficient Memory" in str(e) or "kIOGPUCommandBuffer" in str(e):
+                mx.clear_cache()
+                new_bs = max(1, precomp_bs // 2)
+                LOG.warning("Metal OOM at precomp_bs=%d — retrying with precomp_bs=%d.", precomp_bs, new_bs)
+                precomp_bs = new_bs
+                # Reset partially-filled output arrays before retry
+                all_teacher_topk_values[:] = 0
+                all_teacher_topk_indices[:] = 0
+            else:
+                raise
 
     cache_mb = (all_teacher_topk_values.nbytes + all_teacher_topk_indices.nbytes) / 1e6
     LOG.info("Teacher top-%d logits cached (%.0f MB).", K, cache_mb)
@@ -438,7 +493,7 @@ def main():
         random.shuffle(indices)
 
         for step_start in range(0, n_samples - macro_batch + 1, macro_batch):
-            if args.watchdog and _check_pause_flag(output_dir):
+            if args.watchdog and check_pause_flag(output_dir):
                 LOG.info("Saving student weights before exit.")
                 student_model.save_weights(str(output_dir / "mlx_student_weights.npz"))
                 return
@@ -479,7 +534,7 @@ def main():
                     global_step, epoch_frac, accum_loss,
                     global_step / max(elapsed, 1e-6),
                 )
-                _write_metric(metrics_path, global_step, epoch_frac, loss=accum_loss)
+                write_metric(metrics_path, global_step, epoch_frac, loss=accum_loss)
                 log_history.append({"step": global_step, "epoch": epoch_frac, "loss": accum_loss})
                 _write_trainer_state(trainer_state_path, log_history)
 
@@ -500,7 +555,7 @@ def main():
                     mx.clear_cache()
                 eval_loss_val = sum(eval_losses) / len(eval_losses)
                 LOG.info("  eval_loss=%.4f", eval_loss_val)
-                _write_metric(metrics_path, global_step, epoch_frac, eval_loss=eval_loss_val)
+                write_metric(metrics_path, global_step, epoch_frac, eval_loss=eval_loss_val)
                 log_history.append({"step": global_step, "epoch": epoch_frac, "eval_loss": eval_loss_val})
                 _write_trainer_state(trainer_state_path, log_history)
 

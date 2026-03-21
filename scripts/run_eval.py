@@ -18,10 +18,12 @@ import sys
 from pathlib import Path
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.dirname(__file__))
 from data_pipeline import load_dataset_split, format_prompt_full
+from train_utils import get_device, load_student_model
+from mlx_eval_utils import is_mlx_available, load_mlx_model, compute_mlx_perplexity
+from cpp_eval_utils import is_cpp_available, find_gguf, compute_gguf_perplexity
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,6 +49,8 @@ def parse_args():
                    help="Step number to record in metrics.jsonl (default: auto-detect from checkpoint)")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true")
+    p.add_argument("--backend", type=str, default="auto", choices=["auto", "pytorch", "mlx", "gguf"],
+                   help="Inference backend: gguf (llama.cpp/Metal) > mlx > pytorch for speed (default: auto)")
     p.add_argument("--compare_teacher", action="store_true",
                    help="Also eval teacher model and log perplexity gap")
     p.add_argument("--teacher", type=str, default="Qwen/Qwen2-1.5B-Instruct",
@@ -84,11 +88,6 @@ def last_step_in_jsonl(jsonl_path):
         pass
     return last
 
-
-def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @torch.no_grad()
@@ -164,44 +163,31 @@ def main():
         step = last_step_in_jsonl(jsonl_path)
     logger.info("Recording eval at step %d", step)
 
-    # Load tokenizer — prefer checkpoint dir, fall back to base model
-    tok_dir = str(checkpoint_dir) if (checkpoint_dir / "tokenizer_config.json").exists() else args.student
-    logger.info("Loading tokenizer from %s", tok_dir)
-    tokenizer = AutoTokenizer.from_pretrained(tok_dir, cache_dir=cache_dir, local_files_only=offline)
-    tokenizer.pad_token = tokenizer.eos_token
+    # Resolve backend: gguf (C++/Metal) > mlx > pytorch
+    use_gguf = False
+    use_mlx = False
 
-    # Load model — handle both full models and LoRA adapter checkpoints
-    logger.info("Loading model from %s", checkpoint_dir)
-    device = get_device()
-    is_adapter = (checkpoint_dir / "adapter_config.json").exists()
-    if is_adapter:
-        logger.info("Detected LoRA adapter checkpoint — loading base + adapter")
-        # Read adapter_config to find base model id
-        with open(checkpoint_dir / "adapter_config.json") as f:
-            adapter_cfg = json.load(f)
-        base_model_id = adapter_cfg.get("base_model_name_or_path", args.student)
-        logger.info("Base model: %s", base_model_id)
-        base = AutoModelForCausalLM.from_pretrained(
-            base_model_id,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            cache_dir=cache_dir,
-            local_files_only=offline,
-        )
-        from peft import PeftModel
-        model = PeftModel.from_pretrained(base, str(checkpoint_dir))
-        model = model.merge_and_unload()
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            str(checkpoint_dir),
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            cache_dir=cache_dir,
-            local_files_only=offline,
-        )
-    model.to(device)
+    if args.backend == "gguf":
+        if not is_cpp_available():
+            raise SystemExit("--backend gguf requested but llama.cpp binaries not found")
+        use_gguf = True
+    elif args.backend == "mlx":
+        if not is_mlx_available():
+            raise SystemExit("--backend mlx requested but mlx/mlx-lm not installed")
+        use_mlx = True
+    elif args.backend == "auto":
+        gguf_candidate = find_gguf(str(checkpoint_dir))
+        if gguf_candidate and is_cpp_available():
+            use_gguf = True
+            logger.info("Backend: GGUF/llama.cpp (auto-detected: %s)", Path(gguf_candidate).name)
+        elif is_mlx_available():
+            use_mlx = True
+            logger.info("Backend: MLX (auto-detected)")
 
-    # Load dataset
+    if not use_gguf and not use_mlx:
+        logger.info("Backend: PyTorch")
+
+    # Load dataset (needed regardless of backend for tokenizer fallback path)
     logger.info("Loading dataset %s", args.dataset)
     ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
     dataset = load_dataset_split(args.dataset, args.max_samples, ds_cache, offline)
@@ -215,9 +201,31 @@ def main():
     if args.max_val_samples and len(val_ds) > args.max_val_samples:
         val_ds = val_ds.select(range(args.max_val_samples))
     logger.info("Validation samples: %d", len(val_ds))
+    texts = list(val_ds["text"])
 
-    texts = val_ds["text"]
-    loss = eval_loss(model, tokenizer, texts, args.max_length, args.batch_size, device)
+    if use_gguf:
+        gguf_path = find_gguf(str(checkpoint_dir))
+        if gguf_path is None:
+            raise SystemExit(f"No .gguf file found in {checkpoint_dir}")
+        logger.info("GGUF model: %s", gguf_path)
+        loss = compute_gguf_perplexity(gguf_path, texts, ctx_size=args.max_length)
+    elif use_mlx:
+        # MLX path: batched forward pass, no autoregressive decode
+        model, tokenizer = load_mlx_model(str(checkpoint_dir))
+        loss = compute_mlx_perplexity(model, tokenizer, texts, args.max_length, args.batch_size)
+        del model
+        import mlx.core as mx
+        mx.clear_cache()
+    else:
+        # PyTorch path
+        logger.info("Loading model from %s", checkpoint_dir)
+        device = get_device()
+        model, tokenizer = load_student_model(checkpoint_dir, args.student, cache_dir, offline, device)
+        loss = eval_loss(model, tokenizer, texts, args.max_length, args.batch_size, device)
+        del model
+        if device.type == "mps":
+            torch.mps.empty_cache()
+
     if loss is None:
         logger.error("Could not compute eval loss (no tokens)")
         raise SystemExit(1)
@@ -230,10 +238,21 @@ def main():
     if args.compare_teacher:
         logger.info("Evaluating teacher: %s", args.teacher)
         try:
-            t_loss = eval_model_at_path(
-                args.teacher, tokenizer, texts, args.max_length, args.batch_size, device,
-                cache_dir=cache_dir, offline=offline,
-            )
+            if use_gguf:
+                t_gguf = find_gguf(args.teacher)
+                if t_gguf is None:
+                    raise FileNotFoundError(f"No .gguf found for teacher: {args.teacher}")
+                t_loss = compute_gguf_perplexity(t_gguf, texts, ctx_size=args.max_length)
+            elif use_mlx:
+                t_model, t_tok = load_mlx_model(args.teacher)
+                t_loss = compute_mlx_perplexity(t_model, t_tok, texts, args.max_length, args.batch_size)
+                del t_model
+                import mlx.core as mx; mx.clear_cache()
+            else:
+                t_loss = eval_model_at_path(
+                    args.teacher, tokenizer, texts, args.max_length, args.batch_size, device,
+                    cache_dir=cache_dir, offline=offline,
+                )
             t_ppl = math.exp(min(t_loss, 20))
             gap_pct = (perplexity - t_ppl) / t_ppl * 100
             logger.info("teacher: eval_loss=%.4f  perplexity=%.2f  ppl_gap=+%.1f%%",
@@ -251,10 +270,21 @@ def main():
         if qpath.exists():
             logger.info("Evaluating quantized model: %s", qpath)
             try:
-                q_loss = eval_model_at_path(
-                    str(qpath), tokenizer, texts, args.max_length, args.batch_size, device,
-                    cache_dir=None, offline=True,
-                )
+                if use_gguf or find_gguf(str(qpath)):
+                    q_gguf = find_gguf(str(qpath))
+                    if q_gguf is None:
+                        raise FileNotFoundError(f"No .gguf found in: {qpath}")
+                    q_loss = compute_gguf_perplexity(q_gguf, texts, ctx_size=args.max_length)
+                elif use_mlx:
+                    q_model, q_tok = load_mlx_model(str(qpath))
+                    q_loss = compute_mlx_perplexity(q_model, q_tok, texts, args.max_length, args.batch_size)
+                    del q_model
+                    import mlx.core as mx; mx.clear_cache()
+                else:
+                    q_loss = eval_model_at_path(
+                        str(qpath), tokenizer, texts, args.max_length, args.batch_size, device,
+                        cache_dir=None, offline=True,
+                    )
                 q_ppl = math.exp(min(q_loss, 20))
                 q_gap_pct = (q_ppl - perplexity) / perplexity * 100
                 logger.info("quant:  eval_loss=%.4f  perplexity=%.2f  gap_vs_fp16=+%.1f%%",

@@ -8,6 +8,8 @@ Supports PyTorch, MLX, GGUF, and vLLM backends.
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,6 +22,8 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, str(Path(__file__).parent))
 from universal_model_loader import UniversalModelLoader, detect_model_format
 from artifact_detector import detect_artifacts
+from mlx_eval_utils import is_mlx_available, load_mlx_model, mlx_generate_responses
+from cpp_eval_utils import find_gguf
 
 
 def parse_args():
@@ -354,7 +358,7 @@ def build_eval_ui(runs_dir, model_state):
     # gr.Dropdown accepts (label, value) tuples
     model_choices = [(label, path) for label, path in _discovered] if _discovered else [("(no models found)", "")]
 
-    judge_state = [None, None]  # [judge_model, judge_tokenizer]
+    judge_state = [None, None, None]  # [judge_model, judge_tokenizer, backend]
 
     def generate(prompt, max_tokens, temperature):
         loader = model_state[0]
@@ -390,29 +394,44 @@ def build_eval_ui(runs_dir, model_state):
         log = logging.getLogger(__name__)
         if not (judge_path or "").strip():
             return "Enter a teacher model path or HF id"
+        path = judge_path.strip()
         try:
-            import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            jm = AutoModelForCausalLM.from_pretrained(
-                judge_path.strip(), dtype=torch.bfloat16,
-                device_map="auto", local_files_only=False,
-            )
-            jt = AutoTokenizer.from_pretrained(judge_path.strip())
-            jt.pad_token = jt.eos_token
-            if torch.backends.mps.is_available():
-                jm = jm.to("mps")
-            elif torch.cuda.is_available():
-                jm = jm.to("cuda")
-            judge_state[0], judge_state[1] = jm, jt
-            log.info("Loaded judge: %s", judge_path.strip())
-            return f"Judge loaded: {judge_path.strip()}"
+            # Prefer GGUF if path is a .gguf file or directory containing one
+            gguf_path = find_gguf(path)
+            if gguf_path:
+                from llama_cpp import Llama
+                jm = Llama(model_path=gguf_path, n_ctx=1024, n_gpu_layers=-1, verbose=False)
+                judge_state[0], judge_state[1], judge_state[2] = jm, None, "gguf"
+                log.info("Loaded judge (GGUF/Metal): %s", gguf_path)
+                return f"Judge loaded (GGUF/Metal): {Path(gguf_path).name}"
+            elif is_mlx_available() and os.path.isdir(path):
+                jm, jt = load_mlx_model(path)
+                judge_state[0], judge_state[1], judge_state[2] = jm, jt, "mlx"
+                log.info("Loaded judge (MLX): %s", path)
+                return f"Judge loaded (MLX): {path}"
+            else:
+                import torch
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+                jm = AutoModelForCausalLM.from_pretrained(
+                    path, dtype=torch.bfloat16,
+                    device_map="auto", local_files_only=False,
+                )
+                jt = AutoTokenizer.from_pretrained(path)
+                jt.pad_token = jt.eos_token
+                if torch.backends.mps.is_available():
+                    jm = jm.to("mps")
+                elif torch.cuda.is_available():
+                    jm = jm.to("cuda")
+                judge_state[0], judge_state[1], judge_state[2] = jm, jt, "pytorch"
+                log.info("Loaded judge (PyTorch): %s", path)
+                return f"Judge loaded (PyTorch): {path}"
         except Exception as e:
             log.warning("Judge load failed: %s", e)
             return f"Failed: {e}"
 
     def run_judge(prompt, response):
         import re
-        jm, jt = judge_state[0], judge_state[1]
+        jm, jt, j_backend = judge_state[0], judge_state[1], judge_state[2]
         if jm is None:
             return "Load a judge model first."
         if not (response or "").strip():
@@ -424,12 +443,20 @@ def build_eval_ui(runs_dir, model_state):
             "Rate the response 1-10 for instruction-following and overall quality. "
             "Reply with the score first, then a one-sentence reason. Example: '8 - Clear and direct.'"
         )
-        inputs = jt(judge_prompt, return_tensors="pt", truncation=True, max_length=768)
-        if jm.device.type in ("mps", "cuda"):
-            inputs = {k: v.to(jm.device) for k, v in inputs.items()}
-        out = jm.generate(**inputs, max_new_tokens=60, do_sample=False,
-                          pad_token_id=jt.eos_token_id)
-        raw = jt.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+        if j_backend == "gguf":
+            out = jm(judge_prompt, max_tokens=60, temperature=0.01, echo=False)
+            raw = out["choices"][0]["text"].strip()
+        elif j_backend == "mlx":
+            results = mlx_generate_responses(jm, jt, [judge_prompt], max_new_tokens=60, temperature=0.0)
+            raw = results[0].strip()
+        else:
+            import torch
+            inputs = jt(judge_prompt, return_tensors="pt", truncation=True, max_length=768)
+            if jm.device.type in ("mps", "cuda"):
+                inputs = {k: v.to(jm.device) for k, v in inputs.items()}
+            out = jm.generate(**inputs, max_new_tokens=60, do_sample=False,
+                              pad_token_id=jt.eos_token_id)
+            raw = jt.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
         m = re.search(r"\b([1-9]|10)\b", raw)
         score = int(m.group(1)) if m else None
         prefix = f"Score: {score}/10  —  " if score is not None else ""
@@ -514,6 +541,285 @@ def build_eval_ui(runs_dir, model_state):
     judge_btn.click(run_judge, [prompt_in, output_box], judge_output)
 
 
+# ── Run-evals helpers ──────────────────────────────────────────────────────────
+
+_SCRIPTS_DIR = str(Path(__file__).parent)
+_PROJECT_ROOT = str(Path(__file__).parent.parent)
+
+
+def _run_streaming(cmd: list[str]):
+    """
+    Run a subprocess and yield the accumulated stdout+stderr output after each
+    line, so Gradio can stream it live into a Textbox.
+    Passes -u to Python for unbuffered output.
+    """
+    # Insert -u after the Python interpreter for unbuffered output
+    if cmd and cmd[0] == sys.executable:
+        cmd = [cmd[0], "-u"] + cmd[1:]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd=_PROJECT_ROOT,
+        )
+        output = ""
+        for line in proc.stdout:
+            output += line
+            yield output
+        proc.wait()
+        suffix = "\n✅ Finished (exit 0)" if proc.returncode == 0 else f"\n⚠ Exit code {proc.returncode}"
+        yield output + suffix
+    except Exception as e:
+        yield f"Failed to start script: {e}\n"
+
+
+def _parse_progress_from_log(log_text: str) -> tuple[float, str]:
+    """Return (fraction 0–1, label) from the last progress indicator in log_text."""
+    m = list(re.finditer(r'\b(\d{1,3})%\|', log_text))
+    if m:
+        pct = int(m[-1].group(1))
+        return pct / 100, f"{pct}%"
+    m = list(re.finditer(r'[Ss]tep\s+(\d+)\s*/\s*(\d+)', log_text))
+    if m:
+        x, y = int(m[-1].group(1)), int(m[-1].group(2))
+        return (x / y if y > 0 else 0.0), f"Step {x}/{y}"
+    m = list(re.finditer(r'[Ee]poch[:\s]+(\d+)\s*/\s*(\d+)', log_text))
+    if m:
+        x, y = int(m[-1].group(1)), int(m[-1].group(2))
+        return (x / y if y > 0 else 0.0), f"Epoch {x}/{y}"
+    m = list(re.finditer(r'[Pp]rogress[:\s]+(\d+)%', log_text))
+    if m:
+        pct = int(m[-1].group(1))
+        return pct / 100, f"{pct}%"
+    return 0.0, ""
+
+
+def _progress_bar_html(fraction: float, label: str, running: bool = True) -> str:
+    """Return an HTML snippet for a compact progress bar, or '' when idle."""
+    if not running and not label:
+        return ""
+    pct = max(0, min(100, int(fraction * 100)))
+    color = "#2563eb" if running else "#16a34a"
+    status = label or ("Running…" if running else "Done")
+    return (
+        '<div style="margin:4px 0 6px;">'
+        '<div style="display:flex;justify-content:space-between;font-size:11px;'
+        'color:#6b7280;margin-bottom:2px;">'
+        f'<span>{status}</span><span>{pct}%</span></div>'
+        '<div style="background:#e5e7eb;border-radius:3px;height:6px;overflow:hidden;">'
+        f'<div style="width:{pct}%;background:{color};height:6px;'
+        'border-radius:3px;transition:width 0.3s ease;"></div>'
+        '</div></div>'
+    )
+
+
+def _is_streaming_done(text: str) -> bool:
+    """Return True when _run_streaming has emitted its final terminal line."""
+    last = text.rstrip().split('\n')[-1] if text.strip() else ""
+    return last.startswith("✅") or last.startswith("⚠ Exit code")
+
+
+def build_run_evals_ui(runs_dir: str, pipeline_dirs: list[str]):
+    """
+    Gradio UI for running run_eval.py, run_benchmarks.py, and eval_quality.py
+    directly from the dashboard with live streaming output.
+    """
+    model_choices = pipeline_dirs if pipeline_dirs else []
+
+    gr.Markdown(
+        "Select a model directory and backend, then run any eval script. "
+        "Output streams live. All results are also written to the model directory."
+    )
+
+    # ── Shared controls at top ────────────────────────────────────────────────
+    with gr.Row():
+        shared_model_dd = gr.Dropdown(
+            choices=model_choices,
+            value=model_choices[0] if model_choices else None,
+            label="Model directory",
+            scale=4,
+        )
+        shared_model_custom = gr.Textbox(
+            label="Or enter path manually",
+            placeholder="./distilled-minillm  or  /abs/path/to/model",
+            scale=3,
+        )
+        shared_backend = gr.Dropdown(
+            choices=["auto", "gguf", "mlx", "pytorch"],
+            value="auto",
+            label="Backend",
+            scale=1,
+            info="gguf = fastest (Metal C++)",
+        )
+
+    def _model_path(dd_val, custom_val):
+        return (custom_val or "").strip() or (dd_val or "")
+
+    # ── Perplexity eval ───────────────────────────────────────────────────────
+    with gr.Accordion("📊  Perplexity Eval  —  run_eval.py", open=True):
+        gr.Markdown(
+            "Computes cross-entropy loss and perplexity on a validation split. "
+            "Appends `eval_loss` + `eval_perplexity` to `metrics.jsonl`."
+        )
+        with gr.Row():
+            ppl_max_samples = gr.Slider(500, 10000, value=2000, step=500, label="Max dataset samples")
+            ppl_max_val = gr.Slider(50, 500, value=200, step=50, label="Max val samples")
+            ppl_batch = gr.Slider(4, 32, value=8, step=4, label="Batch size")
+        with gr.Row():
+            ppl_compare_teacher = gr.Checkbox(label="Compare teacher perplexity", value=False)
+            ppl_teacher = gr.Textbox(
+                label="Teacher model (HF id or path)",
+                value="Qwen/Qwen2-1.5B-Instruct",
+                visible=False,
+            )
+        ppl_compare_teacher.change(
+            fn=lambda v: gr.update(visible=v),
+            inputs=ppl_compare_teacher,
+            outputs=ppl_teacher,
+        )
+        ppl_run_btn = gr.Button("▶  Run Perplexity Eval", variant="primary")
+        ppl_progress = gr.HTML(value="")
+        ppl_out = gr.Textbox(label="Output", lines=14, interactive=False, max_lines=200)
+
+        def run_ppl(dd, custom, backend, max_s, max_v, batch, cmp_teacher, teacher):
+            path = _model_path(dd, custom)
+            if not path:
+                yield "⚠ No model path specified.", ""
+                return
+            cmd = [
+                sys.executable,
+                os.path.join(_SCRIPTS_DIR, "run_eval.py"),
+                path,
+                "--backend", backend,
+                "--max_samples", str(int(max_s)),
+                "--max_val_samples", str(int(max_v)),
+                "--batch_size", str(int(batch)),
+            ]
+            if cmp_teacher and teacher.strip():
+                cmd += ["--compare_teacher", "--teacher", teacher.strip()]
+            for text in _run_streaming(cmd):
+                done = _is_streaming_done(text)
+                frac, label = _parse_progress_from_log(text)
+                yield text, _progress_bar_html(frac, label, running=not done)
+
+        ppl_run_btn.click(
+            fn=run_ppl,
+            inputs=[shared_model_dd, shared_model_custom, shared_backend,
+                    ppl_max_samples, ppl_max_val, ppl_batch,
+                    ppl_compare_teacher, ppl_teacher],
+            outputs=[ppl_out, ppl_progress],
+        )
+
+    # ── WikiText-2 benchmark ──────────────────────────────────────────────────
+    with gr.Accordion("📈  WikiText-2 Benchmark  —  run_benchmarks.py", open=False):
+        gr.Markdown(
+            "Evaluates on WikiText-2-raw-v1. Detects regression vs a baseline. "
+            "Saves `benchmark_results.json` and appends `wikitext2_perplexity` to `metrics.jsonl`."
+        )
+        with gr.Row():
+            wt2_n_seq = gr.Slider(100, 2000, value=500, step=100, label="N sequences")
+            wt2_max_len = gr.Slider(128, 1024, value=512, step=128, label="Max token length")
+            wt2_batch = gr.Slider(4, 32, value=8, step=4, label="Batch size")
+        with gr.Row():
+            wt2_baseline = gr.Textbox(
+                label="Baseline dir (optional — enables regression detection)",
+                placeholder="./previous-run",
+                scale=3,
+            )
+            wt2_threshold = gr.Slider(5, 30, value=15, step=5, label="Regression threshold %", scale=1)
+        wt2_run_btn = gr.Button("▶  Run WikiText-2 Benchmark", variant="primary")
+        wt2_progress = gr.HTML(value="")
+        wt2_out = gr.Textbox(label="Output", lines=14, interactive=False, max_lines=200)
+
+        def run_wt2(dd, custom, backend, n_seq, max_len, batch, baseline, threshold):
+            path = _model_path(dd, custom)
+            if not path:
+                yield "⚠ No model path specified.", ""
+                return
+            cmd = [
+                sys.executable,
+                os.path.join(_SCRIPTS_DIR, "run_benchmarks.py"),
+                path,
+                "--backend", backend,
+                "--n_sequences", str(int(n_seq)),
+                "--max_length", str(int(max_len)),
+                "--batch_size", str(int(batch)),
+                "--threshold", str(float(threshold)),
+            ]
+            if (baseline or "").strip():
+                cmd += ["--baseline_dir", baseline.strip()]
+            for text in _run_streaming(cmd):
+                done = _is_streaming_done(text)
+                frac, label = _parse_progress_from_log(text)
+                yield text, _progress_bar_html(frac, label, running=not done)
+
+        wt2_run_btn.click(
+            fn=run_wt2,
+            inputs=[shared_model_dd, shared_model_custom, shared_backend,
+                    wt2_n_seq, wt2_max_len, wt2_batch, wt2_baseline, wt2_threshold],
+            outputs=[wt2_out, wt2_progress],
+        )
+
+    # ── Quality metrics ───────────────────────────────────────────────────────
+    with gr.Accordion("🧪  Quality Metrics  —  eval_quality.py", open=False):
+        gr.Markdown(
+            "Generates responses, measures diversity (distinct-1/2, entropy), applies quality gates, "
+            "and optionally runs LLM-as-judge scoring. Saves `quality_metrics.json`."
+        )
+        with gr.Row():
+            qual_n = gr.Slider(10, 200, value=50, step=10, label="N samples")
+            qual_tokens = gr.Slider(64, 1024, value=256, step=64, label="Max new tokens")
+            qual_batch = gr.Slider(2, 16, value=4, step=2, label="Batch / parallel slots")
+        with gr.Row():
+            qual_judge = gr.Checkbox(label="LLM-as-judge scoring", value=False)
+            qual_tppl = gr.Checkbox(label="Teacher perplexity on outputs", value=False)
+            qual_teacher = gr.Textbox(
+                label="Teacher for judge / PPL",
+                value="Qwen/Qwen2-1.5B-Instruct",
+                scale=3,
+            )
+        qual_run_btn = gr.Button("▶  Run Quality Eval", variant="primary")
+        qual_progress = gr.HTML(value="")
+        qual_out = gr.Textbox(label="Output", lines=18, interactive=False, max_lines=300)
+
+        def run_qual(dd, custom, backend, n, tokens, batch, judge, tppl, teacher):
+            path = _model_path(dd, custom)
+            if not path:
+                yield "⚠ No model path specified.", ""
+                return
+            cmd = [
+                sys.executable,
+                os.path.join(_SCRIPTS_DIR, "eval_quality.py"),
+                path,
+                "--backend", backend,
+                "--n_samples", str(int(n)),
+                "--max_new_tokens", str(int(tokens)),
+                "--batch_size", str(int(batch)),
+            ]
+            if judge:
+                cmd.append("--judge")
+            if tppl:
+                cmd.append("--judge-teacher-ppl")
+            if (judge or tppl) and teacher.strip():
+                cmd += ["--teacher", teacher.strip()]
+            for text in _run_streaming(cmd):
+                done = _is_streaming_done(text)
+                frac, label = _parse_progress_from_log(text)
+                yield text, _progress_bar_html(frac, label, running=not done)
+
+        qual_run_btn.click(
+            fn=run_qual,
+            inputs=[shared_model_dd, shared_model_custom, shared_backend,
+                    qual_n, qual_tokens, qual_batch,
+                    qual_judge, qual_tppl, qual_teacher],
+            outputs=[qual_out, qual_progress],
+        )
+
+
 def main():
     args = parse_args()
     model_state = [None, None]  # [UniversalModelLoader, backend]
@@ -566,6 +872,225 @@ def main():
                     pipeline_plot.value = on_pipeline_select(pipeline_dirs[0])
             with gr.Tab("Thermal"):
                 gr.Markdown("### CPU / GPU temperature & power over time")
+
+                # ── Shared helpers ────────────────────────────────────────────
+                _MFC_CLI = "/Applications/Macs Fan Control.app/Contents/MacOS/Macs Fan Control"
+
+                def _parse_mactop(stdout: str) -> dict:
+                    """Parse mactop JSON output. Handles both list+soc_metrics and flat formats."""
+                    for line in reversed(stdout.strip().splitlines()):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            if isinstance(data, list) and data and "soc_metrics" in data[0]:
+                                return data[0]["soc_metrics"]
+                            if isinstance(data, dict):
+                                return data
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            continue
+                    return {}
+
+                def _fmt_t(v):
+                    try: return f"{float(v):.1f}°C"
+                    except (TypeError, ValueError): return str(v)
+
+                def _fmt_w(v):
+                    try: return f"{float(v):.1f} W"
+                    except (TypeError, ValueError): return str(v)
+
+                # ── Live mactop reading ───────────────────────────────────────
+                mactop_btn = gr.Button("🌡 Read Now  (mactop)", variant="secondary")
+                mactop_out = gr.Textbox(label="Live reading", interactive=False, lines=3)
+
+                def read_mactop():
+                    try:
+                        result = subprocess.run(
+                            ["/opt/homebrew/bin/mactop",
+                             "--headless", "--format", "json", "--count", "1"],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        m = _parse_mactop(result.stdout)
+                        if not m:
+                            return f"Could not parse mactop output:\n{result.stdout[:200]}"
+                        cpu_t = m.get("cpu_temp", m.get("cpu_temp_c", "?"))
+                        gpu_t = m.get("gpu_temp", m.get("gpu_temp_c", "?"))
+                        soc_t = m.get("soc_temp", m.get("soc_temp_c", "?"))
+                        cpu_w = m.get("cpu_power", m.get("cpu_power_w", "?"))
+                        gpu_w = m.get("gpu_power", m.get("gpu_power_w", "?"))
+                        tot_w = m.get("total_power", m.get("total_power_w", "?"))
+                        lines = [
+                            f"CPU  {_fmt_t(cpu_t)}   GPU  {_fmt_t(gpu_t)}   SOC  {_fmt_t(soc_t)}",
+                            f"CPU power  {_fmt_w(cpu_w)}   GPU power  {_fmt_w(gpu_w)}   Total  {_fmt_w(tot_w)}",
+                        ]
+                        for label, val in [("CPU", cpu_t), ("GPU", gpu_t)]:
+                            try:
+                                if float(val) >= 90:
+                                    lines.append(f"⚠ {label} ≥ 90°C — watchdog pause threshold")
+                            except (TypeError, ValueError):
+                                pass
+                        return "\n".join(lines)
+                    except FileNotFoundError:
+                        return "mactop not found at /opt/homebrew/bin/mactop"
+                    except Exception as e:
+                        return f"Error: {e}"
+
+                mactop_btn.click(fn=read_mactop, inputs=[], outputs=mactop_out)
+
+                gr.Markdown("---")
+
+                # ── Fan control ───────────────────────────────────────────────
+                gr.Markdown("#### Fan Control  (Macs Fan Control)")
+
+                with gr.Row():
+                    fan_status_btn = gr.Button("Check Status", variant="secondary", scale=2)
+                    fan_launch_btn = gr.Button("Launch App", variant="secondary", scale=1)
+                fan_feedback = gr.Textbox(label="Status", interactive=False, lines=1)
+
+                def _mfc_status():
+                    if not os.path.exists(_MFC_CLI):
+                        return "Not installed — brew install --cask macs-fan-control"
+                    r = subprocess.run(["pgrep", "-f", "Macs Fan Control.app"],
+                                       capture_output=True, timeout=2)
+                    return "Running" if r.returncode == 0 else "Not running — click Launch App before setting RPM"
+
+                def _mfc_launch():
+                    if not os.path.exists(_MFC_CLI):
+                        return "Not installed — brew install --cask macs-fan-control"
+                    try:
+                        subprocess.Popen(["open", "-a", "Macs Fan Control"])
+                        return "Launched Macs Fan Control"
+                    except Exception as e:
+                        return f"Failed: {e}"
+
+                def _mfc_cmd(*args):
+                    """Run a Macs Fan Control CLI command, return feedback string."""
+                    if not os.path.exists(_MFC_CLI):
+                        return "Macs Fan Control not installed"
+                    r = subprocess.run([_MFC_CLI, *args],
+                                       capture_output=True, text=True, timeout=5)
+                    return r.stdout.strip() or r.stderr.strip() or "Done"
+
+                def set_auto():
+                    return _write_preset(
+                        "Auto",
+                        (0, "", 0, 0),
+                        (0, "", 0, 0),
+                    )
+
+                def set_custom(v):
+                    rpm = int(v)
+                    return _write_preset(
+                        f"Custom {rpm} RPM",
+                        (1, "", rpm, 0),
+                        (1, "", rpm, 0),
+                    )
+
+                fan_status_btn.click(fn=_mfc_status, inputs=[], outputs=fan_feedback)
+                fan_launch_btn.click(fn=_mfc_launch, inputs=[], outputs=fan_feedback)
+
+                # ── Preset helpers ────────────────────────────────────────────
+                def _decode_fan(seg):
+                    """Human-readable string for one fan config segment."""
+                    parts = seg.split(",")
+                    mode = parts[0] if parts else "?"
+                    if mode == "0":
+                        return "Auto"
+                    if mode == "1":
+                        rpm = parts[2] if len(parts) > 2 else "?"
+                        return f"Constant {rpm} RPM"
+                    if mode == "2":
+                        sensor = parts[1].replace("_", " ").title() if len(parts) > 1 else "?"
+                        mn = parts[2] if len(parts) > 2 else "?"
+                        mx = parts[3] if len(parts) > 3 else "?"
+                        return f"Sensor: {sensor}  {mn}–{mx} °C"
+                    return seg
+
+                def _read_active_preset():
+                    import base64 as _b64
+                    r = subprocess.run(
+                        ["defaults", "read", "com.crystalidea.macsfancontrol", "ActivePreset"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    val = r.stdout.strip().strip('"')
+                    b64 = val.split(":", 1)[-1] if ":" in val else val
+                    try:
+                        decoded = _b64.b64decode(b64).decode()
+                        parts = decoded.split("|")
+                        name = parts[0]
+                        fans = [_decode_fan(p) for p in parts[1:]]
+                        labels = ["Left ", "Right"]
+                        lines = [f"Preset: {name}"] + [
+                            f"  {labels[i]}: {fans[i]}" for i in range(len(fans))
+                        ]
+                        return "\n".join(lines)
+                    except Exception as e:
+                        return f"Raw: {val}\n(decode error: {e})"
+
+                def _write_preset(name, fan0, fan1):
+                    """Encode and write sensor-based preset via defaults write."""
+                    import base64 as _b64
+                    m0, s0, mn0, mx0 = fan0
+                    m1, s1, mn1, mx1 = fan1
+                    raw = f"{name}|{m0},{s0},{mn0},{mx0}|{m1},{s1},{mn1},{mx1}"
+                    b64 = _b64.b64encode(raw.encode()).decode()
+                    subprocess.run(
+                        ["defaults", "write", "com.crystalidea.macsfancontrol",
+                         "ActivePreset", f"Unsaved:{b64}"],
+                        timeout=5,
+                    )
+                    # Activate app so it re-reads preferences
+                    subprocess.run(
+                        ["osascript", "-e",
+                         'tell application "Macs Fan Control" to activate'],
+                        capture_output=True, timeout=3,
+                    )
+                    return _read_active_preset()
+
+                # ── Current preset ────────────────────────────────────────────
+                with gr.Row():
+                    fan_read_btn = gr.Button("📋 Read Current Preset", variant="secondary", scale=3)
+                fan_current = gr.Textbox(label="Active preset", interactive=False, lines=3)
+                fan_read_btn.click(fn=_read_active_preset, inputs=[], outputs=fan_current)
+
+                # ── Sensor presets ────────────────────────────────────────────
+                gr.Markdown("**Sensor-based presets**  _(both fans, GPU Clusters Average)_")
+                gr.Markdown(
+                    "_Left side: 1350–5349 RPM  ·  Right side: 1458–5777 RPM_"
+                )
+                with gr.Row():
+                    btn_s_25_33 = gr.Button("GPU Sensor  25–33 °C", variant="primary")
+                    btn_s_28_36 = gr.Button("GPU Sensor  28–36 °C")
+                    btn_auto_preset = gr.Button("Auto  (system)")
+
+                def apply_25_33():
+                    return _write_preset(
+                        "GPU Sensor 25-33",
+                        (2, "gpu_clusters_average", 25, 33),
+                        (2, "gpu_clusters_average", 25, 33),
+                    )
+                def apply_28_36():
+                    return _write_preset(
+                        "Matrix GPU Auto",
+                        (2, "gpu_clusters_average", 28, 36),
+                        (2, "gpu_clusters_average", 28, 36),
+                    )
+
+                btn_s_25_33.click(fn=apply_25_33, inputs=[], outputs=fan_feedback)
+                btn_s_28_36.click(fn=apply_28_36, inputs=[], outputs=fan_feedback)
+                btn_auto_preset.click(fn=set_auto, inputs=[], outputs=fan_feedback)
+
+                # ── Constant RPM ──────────────────────────────────────────────
+                gr.Markdown("**Constant RPM**  _(shared safe range for both fans)_")
+                with gr.Row():
+                    fan_slider = gr.Slider(1458, 5349, value=3000, step=50,
+                                           label="RPM  (Left 1350–5349  ·  Right 1458–5777)",
+                                           scale=4)
+                    fan_apply_btn = gr.Button("Apply RPM", variant="primary", scale=1)
+                fan_apply_btn.click(fn=set_custom, inputs=[fan_slider], outputs=fan_feedback)
+
+                gr.Markdown("---")
                 thermal_log_box = gr.Textbox(
                     label="Log file path",
                     value=str(Path(args.runs_dir).parent / "thermal.log"),
@@ -642,6 +1167,8 @@ def main():
 
             with gr.Tab("Evaluate"):
                 build_eval_ui(args.runs_dir, model_state)
+            with gr.Tab("▶ Run Evals"):
+                build_run_evals_ui(args.runs_dir, pipeline_dirs)
             with gr.Tab("Quality"):
                 gr.Markdown("### Quality metrics (from eval_quality.py)")
                 gr.Markdown(
@@ -852,6 +1379,7 @@ def main():
                     if _ef:
                         exp_trend_plot.value = _ef
 
+    app.queue()  # required for generator-based streaming in Run Evals tab
     app.launch(server_name="127.0.0.1", server_port=args.port)
 
 

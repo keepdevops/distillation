@@ -19,6 +19,7 @@ import torch
 from peft import LoraConfig, get_peft_model
 
 from data_pipeline import load_dataset_split, format_prompt_only, validate_dataset_schema, DATASET_HELP
+from train_utils import get_device
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -45,10 +46,10 @@ OPEN_TEACHER = "Qwen/Qwen2-1.5B-Instruct"
 OPEN_STUDENT = "Qwen/Qwen2-0.5B-Instruct"
 
 # Threshold for "likely clipped" completions.
-# Calibrated for 128-token max: 128 × ~3.5 chars/tok ≈ 448 chars; 430 gives a
+# Calibrated for 256-token max: 256 × ~3.3 chars/tok × 0.97 ≈ 819 chars; 800 gives a
 # small buffer to reliably catch outputs clipped at the hard limit.
 # Update this constant if you change --max_new_tokens significantly.
-_MAX_NATURAL_CHARS = 430
+_MAX_NATURAL_CHARS = 800
 
 
 def response_quality_reward(completions: list, **kwargs) -> list:
@@ -63,10 +64,18 @@ def response_quality_reward(completions: list, **kwargs) -> list:
 
     _MAX_NATURAL_CHARS should be kept slightly below max_new_tokens * ~3.5 chars/tok
     to catch clipped outputs before the hard limit.
+
+    TRL passes completions as plain strings for non-chat datasets, or as
+    list[dict] (conversational format) for instruct/chat models.
     """
     rewards = []
     for completion in completions:
-        text = completion.strip()
+        # Handle both string and conversational (list[dict]) formats
+        if isinstance(completion, list):
+            text = " ".join(m.get("content", "") for m in completion if isinstance(m, dict))
+        else:
+            text = completion
+        text = text.strip()
         n = len(text)
         if n < 10:
             rewards.append(-1.0)   # mode collapse
@@ -93,8 +102,8 @@ def parse_args():
     p.add_argument("--minillm_temp", type=float, default=1.0, help="KD temperature")
     p.add_argument("--max_samples", type=int, default=2000, help="Max train samples (for quick runs)")
     p.add_argument("--eval_steps", type=int, default=20, help="Run eval every N steps (default: 20; lower gives more detail, higher is faster)")
-    p.add_argument("--num_generations", type=int, default=2, help="Generations per prompt for GRPO/MiniLLM (default: 2; 4 gives more advantage variance but is 2x slower)")
-    p.add_argument("--max_new_tokens", type=int, default=128, help="Max tokens to generate (default: 128; update _MAX_NATURAL_CHARS if changed significantly)")
+    p.add_argument("--num_generations", type=int, default=4, help="Generations per prompt for GRPO/MiniLLM (default: 4; more gives better advantage variance at cost of speed)")
+    p.add_argument("--max_new_tokens", type=int, default=256, help="Max tokens to generate (default: 256; update _MAX_NATURAL_CHARS if changed significantly)")
     p.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate (default: 2e-5)")
     p.add_argument("--eval_split", type=float, default=0.02, help="Eval dataset size as fraction of train (default: 0.02 = 2%%)")
     p.add_argument("--cache_dir", type=str, default=None)
@@ -104,11 +113,6 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
     return p.parse_args()
 
-
-def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 
@@ -171,7 +175,7 @@ def main():
     teacher = AutoModelForCausalLM.from_pretrained(
         args.teacher,
         quantization_config=quant_config,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         attn_implementation=_attn_impl,
         device_map="auto",
         cache_dir=cache_dir,
@@ -188,7 +192,7 @@ def main():
     # Student
     student = AutoModelForCausalLM.from_pretrained(
         args.student,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         attn_implementation=_attn_impl,
         device_map="auto",
         cache_dir=cache_dir,

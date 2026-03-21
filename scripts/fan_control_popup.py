@@ -60,11 +60,7 @@ def is_mfc_app_running():
 def launch_mfc_app():
     """Launch Macs Fan Control app in background."""
     try:
-        subprocess.Popen(
-            ["open", "-a", "Macs Fan Control"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        subprocess.Popen(["open", "-a", "Macs Fan Control"])
         return True
     except Exception as e:
         print(f"Failed to launch Macs Fan Control: {e}")

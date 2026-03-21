@@ -1,13 +1,53 @@
 """
 Shared data pipeline utilities for distillation scripts.
 
-Centralises dataset loading, prompt formatting, and tokenization so that
-distill_mlx.py, distill_sft.py, and distill_minillm.py all behave
-consistently and fixes propagate to every backend at once.
+Centralises dataset loading, prompt formatting, tokenization, and quality
+filtering so that all scripts behave consistently.
 """
 
 import os
+import re
 from pathlib import Path
+
+# ── Quality-filter patterns (superset of all scripts) ───────────────────────
+REFUSAL_PATTERNS = [
+    r"(?i)I(?:'m| am) sorry,?\s+(?:but\s+)?I (?:can'?t|cannot|am unable to)",
+    r"(?i)I (?:can'?t|cannot) (?:help|assist|provide|do)",
+    r"(?i)As an AI(?: language model| assistant)?,?\s+I (?:can'?t|cannot|don't|do not)",
+    r"(?i)I'?m not (?:able|allowed|programmed) to",
+    r"(?i)I don'?t have (?:the ability|access|permission)",
+    r"(?i)I cannot (and will not|fulfil)",
+]
+
+NOISE_PATTERNS = [
+    r"(?i)^\s*N/?A\s*$",
+    r"(?i)^\s*none\.?\s*$",
+    r"(?i)^\s*I don'?t know\.?\s*$",
+    r"(?i)^\s*\[.*?\]\s*$",
+]
+
+# Pre-compiled versions — avoids re-compiling on every call
+_REFUSAL_RE = [re.compile(p) for p in REFUSAL_PATTERNS]
+_NOISE_RE   = [re.compile(p) for p in NOISE_PATTERNS]
+
+
+def is_refusal(text: str) -> bool:
+    """Return True if text matches any refusal pattern."""
+    return any(r.search(text) for r in _REFUSAL_RE)
+
+
+def is_noise(text: str) -> bool:
+    """Return True if text matches any noise/degenerate-output pattern."""
+    return any(r.search(text) for r in _NOISE_RE)
+
+
+def distinct2(text: str) -> float:
+    """Distinct-2: fraction of unique bigrams (0 = fully repetitive, 1 = all unique)."""
+    tokens = text.lower().split()
+    bigrams = list(zip(tokens, tokens[1:]))
+    if not bigrams:
+        return 0.0
+    return len(set(bigrams)) / len(bigrams)
 
 
 def load_dataset_split(dataset_path, max_samples=None, cache_dir=None, offline=False):
@@ -22,7 +62,28 @@ def load_dataset_split(dataset_path, max_samples=None, cache_dir=None, offline=F
     Returns:
         HF Dataset (train split).
     """
-    if Path(dataset_path).exists():
+    dataset_p = Path(dataset_path)
+    # If the HF dataset dir doesn't exist, check for a sibling JSONL
+    # (e.g. magpie_synth wrote magpie_raw.jsonl but never converted to hf_dataset/)
+    if not dataset_p.exists():
+        candidates = [
+            dataset_p.parent / "magpie_raw.jsonl",
+            dataset_p.with_suffix(".jsonl"),
+            dataset_p.parent / (dataset_p.name + ".jsonl"),
+        ]
+        for c in candidates:
+            if c.exists() and c.stat().st_size > 0:
+                import logging as _logging
+                _logging.getLogger(__name__).info(
+                    "HF dataset dir not found; loading from JSONL fallback: %s", c
+                )
+                from datasets import load_dataset as _ld
+                ds = _ld("json", data_files=str(c), split="train")
+                if max_samples and len(ds) > max_samples:
+                    ds = ds.select(range(max_samples))
+                return ds
+
+    if dataset_p.exists():
         from datasets import load_from_disk
         ds = load_from_disk(dataset_path)
     elif offline or os.environ.get("HF_DATASETS_OFFLINE") == "1":

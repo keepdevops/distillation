@@ -33,6 +33,7 @@ from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 
 from data_pipeline import load_dataset_split, format_prompt_only, validate_dataset_schema, DATASET_HELP
+from train_utils import get_device
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -73,11 +74,6 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility (default: 42)")
     return p.parse_args()
 
-
-def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 
@@ -195,6 +191,7 @@ def main():
         args.student, cache_dir=cache_dir, local_files_only=offline,
     )
     tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"  # decoder-only: left-pad for correct batch generation
 
     # Load training prompts
     logger.info("Loading dataset: %s", args.dataset)

@@ -27,13 +27,21 @@ import os
 import sys
 from pathlib import Path
 
+# Set offline env vars before any HF imports so internal hub calls (e.g.
+# is_base_mistral in tokenization_utils_tokenizers) respect offline mode.
+if "--offline" in sys.argv or os.environ.get("HF_HUB_OFFLINE") == "1":
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import torch
 from datasets import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 # Add scripts directory to path for local imports
 sys.path.insert(0, os.path.dirname(__file__))
-from data_pipeline import load_dataset_split
+from data_pipeline import load_dataset_split, distinct2
+from train_utils import get_device
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -96,11 +104,6 @@ def parse_args():
     return p.parse_args()
 
 
-def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 def ngrams(tokens: list[str], n: int) -> set[str]:
     return {" ".join(tokens[i: i + n]) for i in range(len(tokens) - n + 1)}
@@ -116,13 +119,6 @@ def jaccard(a: str, b: str, n: int = 3) -> float:
     return len(na & nb) / len(na | nb)
 
 
-def distinct2(text: str) -> float:
-    tokens = text.lower().split()
-    bigrams = list(zip(tokens, tokens[1:]))
-    if not bigrams:
-        return 0.0
-    return len(set(bigrams)) / len(bigrams)
-
 
 @torch.no_grad()
 def generate_text(model, tokenizer, prompt: str, max_new_tokens: int,
@@ -132,10 +128,12 @@ def generate_text(model, tokenizer, prompt: str, max_new_tokens: int,
     out = model.generate(
         **inputs,
         max_new_tokens=max_new_tokens,
-        do_sample=True,
-        temperature=temperature,
-        pad_token_id=tokenizer.eos_token_id,
-        repetition_penalty=1.1,
+        generation_config=GenerationConfig(
+            do_sample=True,
+            temperature=temperature,
+            pad_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.1,
+        ),
     )
     return tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
@@ -145,16 +143,18 @@ def batch_generate_texts(model, tokenizer, prompts: list[str], max_new_tokens: i
                          temperature: float, device) -> list[str]:
     """Generate responses for a batch of prompts in one forward pass."""
     inputs = tokenizer(prompts, return_tensors="pt", truncation=True,
-                       max_length=768, padding=True)
+                       max_length=768, padding=True, padding_side="left")
     inputs = {k: v.to(device) for k, v in inputs.items()}
     prompt_len = inputs["input_ids"].shape[1]
     outputs = model.generate(
         **inputs,
         max_new_tokens=max_new_tokens,
-        do_sample=True,
-        temperature=temperature,
-        pad_token_id=tokenizer.eos_token_id,
-        repetition_penalty=1.1,
+        generation_config=GenerationConfig(
+            do_sample=True,
+            temperature=temperature,
+            pad_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.1,
+        ),
     )
     results = []
     for j, out in enumerate(outputs):

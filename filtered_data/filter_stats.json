@@ -1,0 +1,13 @@
+{
+  "source": "yahma/alpaca-cleaned",
+  "n_loaded": 51760,
+  "filtered_empty": 0,
+  "filtered_instruction_length": 723,
+  "filtered_response_length": 13545,
+  "filtered_refusal": 617,
+  "filtered_noise": 1,
+  "filtered_distinct2": 4,
+  "filtered_dedup": 19,
+  "n_passed": 36870,
+  "n_final": 5000
+}

@@ -36,12 +36,15 @@ import re
 import sys
 from pathlib import Path
 
+from transformers import GenerationConfig
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOG = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(__file__))
+from data_pipeline import distinct2 as _distinct2, is_refusal, is_noise
 
-# ── Diverse system prompts to encourage instruction variety ──────────────────
+# ── Fallback system prompts (used when domain registry is unavailable) ────────
 SYSTEM_PROMPTS = [
     "You are a helpful assistant.",
     "You are an expert software engineer. Help with programming and debugging.",
@@ -61,6 +64,49 @@ SYSTEM_PROMPTS = [
     "You are a brainstorming partner. Generate and expand ideas creatively.",
 ]
 
+_DEFAULT_FILTER_CFG = {
+    "min_resp_words": 20, "max_resp_words": 600,
+    "min_d2": 0.30, "require_code": False, "require_numbers": False,
+}
+
+# Default location of the domain registry JSON (relative to this file's parent)
+_DEFAULT_DOMAINS_FILE = str(Path(__file__).parent.parent / "configs" / "domain_prompts.json")
+
+
+def _load_domain_registry(domains_file: Path) -> tuple[dict, dict]:
+    """Load domain system prompts and filter configs from a JSON registry.
+
+    Returns (prompt_pools, filter_configs) where keys are domain names.
+    Falls back gracefully if the file is missing or malformed.
+    """
+    if not domains_file.exists():
+        LOG.warning("Domain registry not found: %s — using built-in general prompts.", domains_file)
+        return {"general": SYSTEM_PROMPTS}, {"general": _DEFAULT_FILTER_CFG}
+
+    try:
+        with open(domains_file) as f:
+            registry = json.load(f)
+
+        prompt_pools: dict[str, list[str]] = {}
+        filter_configs: dict[str, dict] = {}
+        for key, val in registry.items():
+            if key.startswith("_"):
+                continue  # skip comment keys
+            flt = val.get("filter", {})
+            prompt_pools[key] = val.get("system_prompts", SYSTEM_PROMPTS)
+            filter_configs[key] = {
+                "min_resp_words":  flt.get("min_resp_words",  _DEFAULT_FILTER_CFG["min_resp_words"]),
+                "max_resp_words":  flt.get("max_resp_words",  _DEFAULT_FILTER_CFG["max_resp_words"]),
+                "min_d2":          flt.get("min_d2",          _DEFAULT_FILTER_CFG["min_d2"]),
+                "require_code":    flt.get("require_code",    False),
+                "require_numbers": flt.get("require_numbers", False),
+            }
+        LOG.info("Loaded %d domains from %s", len(prompt_pools), domains_file)
+        return prompt_pools, filter_configs
+    except (json.JSONDecodeError, KeyError, OSError) as e:
+        LOG.error("Failed to load domain registry %s: %s — using built-in general prompts.", domains_file, e)
+        return {"general": SYSTEM_PROMPTS}, {"general": _DEFAULT_FILTER_CFG}
+
 # ── Inline quality filters (fast, no external deps) ─────────────────────────
 MIN_INSTRUCTION_WORDS = 5
 MAX_INSTRUCTION_WORDS = 180
@@ -68,42 +114,25 @@ MIN_RESPONSE_WORDS    = 20
 MAX_RESPONSE_WORDS    = 600
 MIN_DISTINCT2         = 0.30
 
-REFUSAL_PATTERNS = [
-    r"(?i)I(?:'m| am) sorry,?\s+(?:but\s+)?I (?:can'?t|cannot|am unable to)",
-    r"(?i)I (?:can'?t|cannot) (?:help|assist|provide|do)",
-    r"(?i)As an AI(?: language model| assistant)?,?\s+I (?:can'?t|cannot|don't)",
-    r"(?i)I'?m not (?:able|allowed|programmed) to",
-]
-NOISE_PATTERNS = [
-    r"(?i)^\s*N/?A\s*$",
-    r"(?i)^\s*none\.?\s*$",
-    r"(?i)^\s*I don'?t know\.?\s*$",
-    r"(?i)^\s*\[.*?\]\s*$",        # bare bracketed placeholders
-]
 
-
-def _distinct2(text: str) -> float:
-    toks = text.lower().split()
-    bg = list(zip(toks, toks[1:]))
-    return len(set(bg)) / len(bg) if bg else 0.0
-
-
-def _passes_filter(instruction: str, response: str) -> bool:
+def _passes_filter(instruction: str, response: str, filter_cfg: dict) -> bool:
     if not instruction or not response:
         return False
     iw = len(instruction.split())
     rw = len(response.split())
     if not (MIN_INSTRUCTION_WORDS <= iw <= MAX_INSTRUCTION_WORDS):
         return False
-    if not (MIN_RESPONSE_WORDS <= rw <= MAX_RESPONSE_WORDS):
+    if not (filter_cfg["min_resp_words"] <= rw <= filter_cfg["max_resp_words"]):
         return False
-    for p in REFUSAL_PATTERNS:
-        if re.search(p, response):
-            return False
-    for p in NOISE_PATTERNS:
-        if re.search(p, response) or re.search(p, instruction):
-            return False
-    if _distinct2(response) < MIN_DISTINCT2:
+    if is_refusal(response):
+        return False
+    if is_noise(response) or is_noise(instruction):
+        return False
+    if _distinct2(response) < filter_cfg["min_d2"]:
+        return False
+    if filter_cfg.get("require_code") and not re.search(r"```|`[^`]+`", response):
+        return False
+    if filter_cfg.get("require_numbers") and not re.search(r"\d", response):
         return False
     return True
 
@@ -158,18 +187,52 @@ def generate_batch(model, tokenizer, prompts: list[str],
         out = model.generate(
             **enc,
             max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=temperature,
-            top_p=0.95,
-            repetition_penalty=1.1,
-            eos_token_id=[tokenizer.eos_token_id, im_end_id],
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            generation_config=GenerationConfig(
+                do_sample=True,
+                temperature=temperature,
+                top_p=0.95,
+                repetition_penalty=1.1,
+                eos_token_id=[tokenizer.eos_token_id, im_end_id],
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            ),
         )
 
     return [
         _decode_new_tokens(tokenizer, out[i].tolist(), total_input_len, im_end_id)
         for i in range(len(prompts))
     ]
+
+
+def generate_batch_mlx(mlx_model, mlx_tokenizer, prompts: list[str],
+                       max_new_tokens: int, temperature: float,
+                       stop_str: str = "<|im_end|>") -> list[str]:
+    """MLX-native generation — 2–4× faster than PyTorch MPS on Apple Silicon.
+
+    mlx-lm does not support true batched autoregressive decode, but sequential
+    generation with native Metal kernels is significantly faster than MPS.
+    On M3 Max: ~80 tok/s for 1.5B vs ~20–30 tok/s for PyTorch MPS.
+    """
+    from mlx_lm import generate
+    from mlx_lm.sample_utils import make_sampler
+
+    sampler = make_sampler(temp=temperature)
+    results = []
+    for prompt in prompts:
+        out = generate(
+            mlx_model, mlx_tokenizer,
+            prompt=prompt,
+            max_tokens=max_new_tokens,
+            sampler=sampler,
+            verbose=False,
+        )
+        # mlx-lm ≥0.10 returns only new tokens; older versions return prompt+new
+        if out.startswith(prompt):
+            out = out[len(prompt):]
+        # Truncate at ChatML stop string
+        if stop_str and stop_str in out:
+            out = out[:out.index(stop_str)]
+        results.append(out.strip())
+    return results
 
 
 # ── Convert JSONL → HF dataset ───────────────────────────────────────────────
@@ -199,13 +262,24 @@ def parse_args():
     p = argparse.ArgumentParser(description="Magpie self-synthesis for distillation")
     p.add_argument("--teacher", type=str, default="Qwen/Qwen2-1.5B-Instruct",
                    help="Teacher model ID for generation (default: Qwen/Qwen2-1.5B-Instruct)")
+    p.add_argument("--domain", type=str, default="general",
+                   help="Domain key from the domain registry (default: general). "
+                        "Must match a key in --domains_file. Custom domains saved via the UI are valid.")
+    p.add_argument("--domains_file", type=str, default=_DEFAULT_DOMAINS_FILE,
+                   help="Path to domain registry JSON (default: configs/domain_prompts.json). "
+                        "Add new domains to this file to extend synthesis without code changes.")
     p.add_argument("--n", type=int, default=10000,
                    help="Number of pairs to GENERATE before filtering (default: 10000). "
                         "Expect ~40-60%% to survive inline filters.")
     p.add_argument("--output_dir", type=str, required=True,
                    help="Directory to write magpie_raw.jsonl + hf_dataset/")
-    p.add_argument("--batch_size", type=int, default=8,
-                   help="Generation batch size (default: 8, reduce if OOM)")
+    p.add_argument("--backend", type=str, default="auto",
+                   choices=["auto", "mlx", "mps", "cuda", "cpu"],
+                   help="Generation backend. 'auto' picks MLX on Apple Silicon if available, "
+                        "else PyTorch (mps/cuda/cpu). MLX is 2–4× faster on M-series. (default: auto)")
+    p.add_argument("--batch_size", type=int, default=32,
+                   help="Generation batch size (default: 32; for MLX controls loop chunk size only — "
+                        "MLX generates sequentially. Reduce for MPS/CUDA if OOM)")
     p.add_argument("--max_instruction_tokens", type=int, default=150,
                    help="Max new tokens for instruction generation (default: 150)")
     p.add_argument("--max_response_tokens", type=int, default=512,
@@ -234,9 +308,10 @@ def parse_args():
 def main():
     args = parse_args()
 
-    import torch
     import random as _random
     _random.seed(args.seed)
+
+    import torch
     torch.manual_seed(args.seed)
 
     output_dir = Path(args.output_dir)
@@ -248,41 +323,87 @@ def main():
     if offline:
         os.environ["HF_HUB_OFFLINE"] = "1"
 
-    # ── Detect device ────────────────────────────────────────────────────────
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
-    LOG.info("Device: %s", device)
-
-    # ── Load teacher ─────────────────────────────────────────────────────────
-    from transformers import AutoModelForCausalLM, AutoTokenizer
     cache_dir = os.environ.get("HF_HOME") or args.cache_dir
 
+    # ── Resolve backend ───────────────────────────────────────────────────────
+    backend = args.backend
+    if backend == "auto":
+        try:
+            import mlx.core  # noqa: F401
+            from mlx_lm import load as _mlx_load_check  # noqa: F401
+            backend = "mlx"
+        except ImportError:
+            if torch.backends.mps.is_available():
+                backend = "mps"
+            elif torch.cuda.is_available():
+                backend = "cuda"
+            else:
+                backend = "cpu"
+    LOG.info("Backend: %s", backend)
+
+    # ── Load teacher ─────────────────────────────────────────────────────────
     LOG.info("Loading teacher: %s", args.teacher)
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.teacher, cache_dir=cache_dir, local_files_only=offline,
-    )
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.teacher,
-        torch_dtype=torch.float16,
-        device_map="auto",
-        cache_dir=cache_dir,
-        local_files_only=offline,
-    )
-    model.eval()
+    if backend == "mlx":
+        from mlx_lm import load as mlx_load
+        mlx_model, mlx_tokenizer = mlx_load(args.teacher)
+        # Extract underlying HF tokenizer for ChatML prefix building
+        tokenizer = getattr(mlx_tokenizer, "_tokenizer", mlx_tokenizer)
+        if getattr(tokenizer, "pad_token_id", None) is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        device = None
+        im_end_id = None
 
-    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    if im_end_id == tokenizer.unk_token_id:
-        # Fallback for non-ChatML models: use newline + EOS as stop
-        im_end_id = tokenizer.eos_token_id
-        LOG.warning("Model does not use <|im_end|> — stop token set to eos_token_id")
+        def _generate(prompts, max_new_tokens, temperature):
+            return generate_batch_mlx(mlx_model, mlx_tokenizer, prompts,
+                                      max_new_tokens, temperature)
+    else:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        if backend == "mps":
+            device = torch.device("mps")
+        elif backend == "cuda":
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.teacher, cache_dir=cache_dir, local_files_only=offline,
+        )
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+        model = AutoModelForCausalLM.from_pretrained(
+            args.teacher,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            cache_dir=cache_dir,
+            local_files_only=offline,
+        )
+        model.eval()
+
+        im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        if im_end_id == tokenizer.unk_token_id:
+            im_end_id = tokenizer.eos_token_id
+            LOG.warning("Model does not use <|im_end|> — stop token set to eos_token_id")
+
+        def _generate(prompts, max_new_tokens, temperature):
+            return generate_batch(model, tokenizer, prompts, max_new_tokens,
+                                  temperature, device, im_end_id)
+
+    # ── Load domain registry ──────────────────────────────────────────────────
+    prompt_pools, filter_configs = _load_domain_registry(Path(args.domains_file))
+
+    domain = args.domain
+    if domain not in prompt_pools:
+        available = sorted(prompt_pools.keys())
+        LOG.warning("Domain '%s' not found in registry. Available: %s. Falling back to 'general'.",
+                    domain, available)
+        domain = "general" if "general" in prompt_pools else available[0]
+
+    prompt_pool = prompt_pools[domain]
+    filter_cfg  = filter_configs.get(domain, _DEFAULT_FILTER_CFG)
+    LOG.info("Domain: %s  |  system prompt pool size: %d", domain, len(prompt_pool))
 
     # ── Resume: count already-generated examples ─────────────────────────────
     n_already = 0
@@ -306,22 +427,20 @@ def main():
             while n_generated < n_to_generate:
                 batch = min(args.batch_size, n_to_generate - n_generated)
 
-                # Pick system prompts (cycle through for diversity)
+                # Pick system prompts (cycle through domain pool for diversity)
                 sys_prompts = [
-                    SYSTEM_PROMPTS[(sys_cycle + i) % len(SYSTEM_PROMPTS)]
+                    prompt_pool[(sys_cycle + i) % len(prompt_pool)]
                     for i in range(batch)
                 ]
-                sys_cycle = (sys_cycle + batch) % len(SYSTEM_PROMPTS)
+                sys_cycle = (sys_cycle + batch) % len(prompt_pool)
 
                 # ── Phase 1: generate instructions ───────────────────────────
                 inst_prefixes = [_build_instruction_prefix(sp) for sp in sys_prompts]
                 try:
-                    instructions = generate_batch(
-                        model, tokenizer, inst_prefixes,
+                    instructions = _generate(
+                        inst_prefixes,
                         max_new_tokens=args.max_instruction_tokens,
                         temperature=args.inst_temp,
-                        device=device,
-                        im_end_id=im_end_id,
                     )
                 except Exception as e:
                     LOG.warning("Instruction batch failed: %s", e)
@@ -344,12 +463,10 @@ def main():
                     for sp, instr in zip(valid_sys, valid_instr)
                 ]
                 try:
-                    responses = generate_batch(
-                        model, tokenizer, resp_prefixes,
+                    responses = _generate(
+                        resp_prefixes,
                         max_new_tokens=args.max_response_tokens,
                         temperature=args.resp_temp,
-                        device=device,
-                        im_end_id=im_end_id,
                     )
                 except Exception as e:
                     LOG.warning("Response batch failed: %s", e)
@@ -361,10 +478,10 @@ def main():
                     if not resp:
                         stats["empty_resp"] += 1
                         continue
-                    if not _passes_filter(instr, resp):
+                    if not _passes_filter(instr, resp, filter_cfg):
                         stats["filtered"] += 1
                         continue
-                    fout.write(json.dumps({"instruction": instr, "input": "", "output": resp}))
+                    fout.write(json.dumps({"instruction": instr, "input": "", "output": resp, "domain": domain}))
                     fout.write("\n")
                     n_kept += 1
 
@@ -378,9 +495,8 @@ def main():
                         n_generated, n_to_generate, n_kept, pass_rate,
                         stats["empty_instr"], stats["empty_resp"], stats["filtered"],
                     )
-                    # Rebuild HF dataset incrementally so it's always usable on interrupt
+                    # Flush JSONL (crash-safe artifact); HF dataset rebuilt once at end.
                     fout.flush()
-                    jsonl_to_hf_dataset(jsonl_path, hf_dir)
 
         LOG.info("Generation complete: %d generated, %d kept (%.1f%% pass rate)",
                  n_generated, n_kept - n_already,
@@ -415,8 +531,9 @@ def main():
             LOG.warning("filter_dataset.py exited with code %d", result.returncode)
 
     LOG.info(
-        "Done. Use with distillation:\n"
+        "Done [domain=%s]. Use with distillation:\n"
         "  python scripts/run_distillation_agent.py --dataset %s --backend mlx --open",
+        domain,
         hf_dir if not args.filter else output_dir / "filtered",
     )
 

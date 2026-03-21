@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from data_pipeline import load_dataset_split, format_prompt_full, pretokenize, validate_dataset_schema, DATASET_HELP
+from train_utils import check_pause_flag, write_metric
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(
@@ -108,22 +109,10 @@ class UnslothKDTrainer:
         self.metrics_path = output_dir / "metrics.jsonl"
 
     def _check_pause(self):
-        flag = self.output_dir / "pause.flag"
-        if not flag.exists():
-            return False
-        try:
-            with open(flag) as f:
-                info = json.load(f)
-            reason = info.get("reason", "unknown")
-        except (json.JSONDecodeError, OSError):
-            reason = "pause.flag"
-        LOG.info("pause.flag detected (reason=%s). Stopping.", reason)
-        return True
+        return check_pause_flag(self.output_dir)
 
     def _write_metric(self, step, epoch, **kwargs):
-        row = {"step": step, "epoch": epoch, **kwargs}
-        with open(self.metrics_path, "a") as f:
-            f.write(json.dumps(row) + "\n")
+        write_metric(self.metrics_path, step, epoch, **kwargs)
 
     def _precompute_teacher_topk(self, all_input_ids_np, K):
         """Pre-compute teacher top-K logits for all samples once.

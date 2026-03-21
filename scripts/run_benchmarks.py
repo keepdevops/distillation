@@ -25,11 +25,12 @@ from pathlib import Path
 
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Reuse eval_loss from run_eval to avoid duplication
 sys.path.insert(0, str(Path(__file__).parent))
 from run_eval import eval_loss, detect_step, last_step_in_jsonl
+from train_utils import get_device, load_student_model
+from mlx_eval_utils import is_mlx_available, load_mlx_model, compute_mlx_perplexity
+from cpp_eval_utils import is_cpp_available, find_gguf, compute_gguf_perplexity
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -59,13 +60,10 @@ def parse_args():
                    help="Step number to record (default: auto-detect)")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true")
+    p.add_argument("--backend", type=str, default="auto", choices=["auto", "pytorch", "mlx", "gguf"],
+                   help="Inference backend: gguf (llama.cpp/Metal) > mlx > pytorch for speed (default: auto)")
     return p.parse_args()
 
-
-def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_wikitext2(n_sequences: int, cache_dir: str | None, offline: bool) -> list[str]:
@@ -78,32 +76,6 @@ def load_wikitext2(n_sequences: int, cache_dir: str | None, offline: bool) -> li
         texts = texts[:n_sequences]
     return texts
 
-
-def load_student_model(checkpoint_dir: Path, student_id: str, cache_dir, offline, device):
-    """Load model + tokenizer, handling LoRA adapter checkpoints."""
-    tok_dir = str(checkpoint_dir) if (checkpoint_dir / "tokenizer_config.json").exists() else student_id
-    tokenizer = AutoTokenizer.from_pretrained(tok_dir, cache_dir=cache_dir, local_files_only=offline)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    is_adapter = (checkpoint_dir / "adapter_config.json").exists()
-    if is_adapter:
-        with open(checkpoint_dir / "adapter_config.json") as f:
-            adapter_cfg = json.load(f)
-        base_id = adapter_cfg.get("base_model_name_or_path", student_id)
-        from peft import PeftModel
-        base = AutoModelForCausalLM.from_pretrained(
-            base_id, dtype=torch.bfloat16, device_map="auto",
-            cache_dir=cache_dir, local_files_only=offline,
-        )
-        model = PeftModel.from_pretrained(base, str(checkpoint_dir))
-        model = model.merge_and_unload()
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            str(checkpoint_dir), dtype=torch.bfloat16, device_map="auto",
-            cache_dir=cache_dir, local_files_only=offline,
-        )
-    model.to(device)
-    return model, tokenizer
 
 
 def load_baseline_result(baseline_dir: str) -> dict | None:
@@ -134,8 +106,28 @@ def main():
 
     cache_dir = os.environ.get("HF_HOME") or args.cache_dir
     ds_cache = os.environ.get("HF_DATASETS_CACHE") or args.cache_dir
-    device = get_device()
-    logger.info("Device: %s", device)
+
+    # Resolve backend: gguf (C++/Metal) > mlx > pytorch
+    use_gguf = False
+    use_mlx = False
+
+    if args.backend == "gguf":
+        if not is_cpp_available():
+            raise SystemExit("--backend gguf requested but llama.cpp binaries not found")
+        use_gguf = True
+    elif args.backend == "mlx":
+        if not is_mlx_available():
+            raise SystemExit("--backend mlx requested but mlx/mlx-lm not installed")
+        use_mlx = True
+    elif args.backend == "auto":
+        gguf_candidate = find_gguf(str(checkpoint_dir))
+        if gguf_candidate and is_cpp_available():
+            use_gguf = True
+        elif is_mlx_available():
+            use_mlx = True
+
+    backend_label = "GGUF/llama.cpp" if use_gguf else ("MLX" if use_mlx else "PyTorch (device=%s)" % get_device())
+    logger.info("Backend: %s", backend_label)
 
     # Determine step
     step = args.step
@@ -145,26 +137,38 @@ def main():
         step = last_step_in_jsonl(jsonl_path)
     logger.info("Recording benchmark at step %d", step)
 
-    # Load model
-    logger.info("Loading model from %s", checkpoint_dir)
-    model, tokenizer = load_student_model(checkpoint_dir, args.student, cache_dir, offline, device)
-
     # Load WikiText-2
     texts = load_wikitext2(args.n_sequences, ds_cache, offline)
     logger.info("Evaluating on %d sequences (max_length=%d)...", len(texts), args.max_length)
 
-    loss = eval_loss(model, tokenizer, texts, args.max_length, args.batch_size, device)
+    # Load model and compute perplexity
+    logger.info("Loading model from %s", checkpoint_dir)
+    if use_gguf:
+        gguf_path = find_gguf(str(checkpoint_dir))
+        if gguf_path is None:
+            raise SystemExit(f"No .gguf file found in {checkpoint_dir}")
+        logger.info("GGUF model: %s", gguf_path)
+        loss = compute_gguf_perplexity(gguf_path, texts, ctx_size=args.max_length)
+    elif use_mlx:
+        model, tokenizer = load_mlx_model(str(checkpoint_dir))
+        loss = compute_mlx_perplexity(model, tokenizer, texts, args.max_length, args.batch_size)
+        del model
+        import mlx.core as mx
+        mx.clear_cache()
+    else:
+        device = get_device()
+        model, tokenizer = load_student_model(checkpoint_dir, args.student, cache_dir, offline, device)
+        loss = eval_loss(model, tokenizer, texts, args.max_length, args.batch_size, device)
+        del model
+        if device.type == "mps":
+            torch.mps.empty_cache()
+
     if loss is None:
         logger.error("Could not compute loss (no tokens)")
         raise SystemExit(1)
 
     perplexity = math.exp(min(loss, 20))
     logger.info("WikiText-2: loss=%.4f  perplexity=%.2f", loss, perplexity)
-
-    # Free model memory
-    del model
-    if device.type == "mps":
-        torch.mps.empty_cache()
 
     # Regression detection
     regression_status = "not_checked"
