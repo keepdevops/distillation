@@ -150,7 +150,7 @@ def main():
         logger.info("GGUF model: %s", gguf_path)
         loss = compute_gguf_perplexity(gguf_path, texts, ctx_size=args.max_length)
     elif use_mlx:
-        model, tokenizer = load_mlx_model(str(checkpoint_dir))
+        model, tokenizer = load_mlx_model(str(checkpoint_dir), student_name=args.student)
         loss = compute_mlx_perplexity(model, tokenizer, texts, args.max_length, args.batch_size)
         del model
         import mlx.core as mx

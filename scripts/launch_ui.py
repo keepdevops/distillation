@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import base64
 import json
 import os
 import queue
@@ -16,6 +17,8 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+
+import pandas as pd
 
 # Auto-relaunch through pixi if gradio is not importable
 try:
@@ -231,13 +234,88 @@ def discover_output_dirs() -> list[str]:
 # ---------------------------------------------------------------------------
 _proc: subprocess.Popen | None = None
 _log_queue: queue.Queue = queue.Queue()
+_loss_history: list[dict] = []
+_loss_step_counter: int = 0
+_run_log_fh   = None   # open text file handle for current run (or None)
+_run_json_fh  = None   # open jsonl file handle for current run (or None)
+
+_LOG_STEP_RE   = re.compile(r"(?<!\w)step=(\d+)")
+_LOG_EPOCH_RE  = re.compile(r"(?<!\w)epoch=([\d.]+)")
+_LOG_LOSS_RE   = re.compile(r"(?<!\w)loss=([\d.eE+\-]+)")
+_LOG_ELOSS_RE  = re.compile(r"(?<!\w)eval_loss=([\d.eE+\-]+)")
+_LOG_GRAD_RE   = re.compile(r"['\"]grad_norm['\"]\s*:\s*['\"]?([\d.eE+\-]+)")
+_LOG_LR_RE     = re.compile(r"['\"]learning_rate['\"]\s*:\s*['\"]?([\d.eE+\-]+)")
+_LOG_PT_LOSS   = re.compile(r"['\"]loss['\"]\s*:\s*['\"]?([\d.eE+\-]+)")
+_LOG_PT_EPOCH  = re.compile(r"['\"]epoch['\"]\s*:\s*['\"]?([\d.]+)")
+
+
+def _parse_line_to_json(line: str) -> dict | None:
+    """Extract structured metrics from a log line. Returns None if no metrics found."""
+    import time as _t
+    entry: dict = {}
+    m = _LOG_STEP_RE.search(line)
+    if m:
+        entry["step"] = int(m.group(1))
+    m = _LOG_EPOCH_RE.search(line)
+    if m:
+        entry["epoch"] = float(m.group(1))
+    m = _LOG_ELOSS_RE.search(line)
+    if m:
+        entry["eval_loss"] = float(m.group(1))
+    elif (m := _LOG_LOSS_RE.search(line)):
+        entry["loss"] = float(m.group(1))
+    if "loss" not in entry and "eval_loss" not in entry:
+        m = _LOG_PT_LOSS.search(line)
+        if m:
+            entry["loss"] = float(m.group(1))
+        m = _LOG_PT_EPOCH.search(line)
+        if m:
+            entry["epoch"] = float(m.group(1))
+    if not entry:
+        return None
+    m = _LOG_GRAD_RE.search(line)
+    if m:
+        entry["grad_norm"] = float(m.group(1))
+    m = _LOG_LR_RE.search(line)
+    if m:
+        entry["lr"] = float(m.group(1))
+    entry["ts"] = _t.strftime("%Y-%m-%dT%H:%M:%S")
+    entry["msg"] = line.strip()
+    return entry
 
 
 def _stream_output(proc: subprocess.Popen) -> None:
     for line in proc.stdout:
         _log_queue.put(line)
+        if _run_log_fh:
+            try:
+                _run_log_fh.write(line)
+                _run_log_fh.flush()
+            except Exception:
+                pass
+        if _run_json_fh:
+            entry = _parse_line_to_json(line.rstrip())
+            if entry:
+                try:
+                    _run_json_fh.write(json.dumps(entry) + "\n")
+                    _run_json_fh.flush()
+                except Exception:
+                    pass
     proc.wait()
-    _log_queue.put(f"\n[Process exited with code {proc.returncode}]\n")
+    exit_line = f"\n[Process exited with code {proc.returncode}]\n"
+    _log_queue.put(exit_line)
+    if _run_log_fh:
+        try:
+            _run_log_fh.write(exit_line)
+            _run_log_fh.flush()
+            _run_log_fh.close()
+        except Exception:
+            pass
+    if _run_json_fh:
+        try:
+            _run_json_fh.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -258,10 +336,20 @@ def _build_cmd(script: str, params: dict) -> list[str]:
 
 
 def _start_proc(cmd: list[str]) -> tuple[str, str]:
-    global _proc, _log_queue
+    global _proc, _log_queue, _loss_history, _loss_step_counter, _run_log_fh, _run_json_fh
     if _proc is not None and _proc.poll() is None:
         return "A run is already in progress. Stop it first.", _run_status()
     _log_queue = queue.Queue()
+    _loss_history = []
+    _loss_step_counter = 0
+    # Close any leftover file handles from a previous run
+    for _fh in (_run_log_fh, _run_json_fh):
+        if _fh:
+            try:
+                _fh.close()
+            except Exception:
+                pass
+    _run_log_fh = _run_json_fh = None
     env = os.environ.copy()
     env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
     _proc = subprocess.Popen(
@@ -275,6 +363,25 @@ def _start_proc(cmd: list[str]) -> tuple[str, str]:
     )
     threading.Thread(target=_stream_output, args=(_proc,), daemon=True).start()
     return f"Launched: {' '.join(cmd)}\n", _run_status()
+
+
+def _ep_start_proc(cmd: list[str], label: str = "expert") -> tuple[str, str]:
+    """Like _start_proc but also opens timestamped .log and .jsonl files under runs/."""
+    global _run_log_fh, _run_json_fh
+    import time as _t
+    ts = _t.strftime("%Y%m%d-%H%M%S")
+    log_dir = PROJECT_DIR / "runs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path  = log_dir / f"{label}_{ts}.log"
+    json_path = log_dir / f"{label}_{ts}.jsonl"
+    try:
+        _run_log_fh  = open(log_path,  "w", buffering=1)
+        _run_json_fh = open(json_path, "w", buffering=1)
+    except OSError as e:
+        _run_log_fh = _run_json_fh = None
+        return f"Could not open log files: {e}", _run_status()
+    msg, status = _start_proc(cmd)
+    return msg + f"Logs → {log_path}\nJSON → {json_path}\n", status
 
 
 def launch_run(
@@ -355,23 +462,32 @@ def _run_status() -> str:
 
 
 def poll_logs(current_log: str):
+    global _loss_history
     lines = []
     try:
         while True:
             lines.append(_log_queue.get_nowait())
     except queue.Empty:
         pass
+    new_metrics = _extract_metrics_from_lines(lines)
+    if new_metrics:
+        _loss_history.extend(new_metrics)
     new_log = current_log + "".join(lines)
     running = _proc is not None and _proc.poll() is None
     frac, label = _parse_progress_from_log(new_log)
     html = _progress_bar_html(frac, label, running=running)
-    # Same progress HTML mirrored to all tabs; status mirrored to dom_status too
     status = _run_status()
-    return new_log, status, html, html, html, html, html, status
+    loss_df, grad_df = _loss_plot_data()
+    return new_log, status, html, html, html, html, html, status, loss_df, grad_df, html, new_log, loss_df, grad_df
 
 
 def clear_logs():
-    return "", _run_status()
+    global _loss_history, _loss_step_counter
+    _loss_history = []
+    _loss_step_counter = 0
+    seed_loss = pd.DataFrame({"step": [0], "loss": [0.0]})
+    seed_grad = pd.DataFrame({"step": [0], "grad_norm": [0.0]})
+    return "", _run_status(), seed_loss, seed_grad, "", seed_loss, seed_grad
 
 
 def _parse_progress_from_log(log_text: str) -> tuple[float, str]:
@@ -397,6 +513,62 @@ def _parse_progress_from_log(log_text: str) -> tuple[float, str]:
         pct = int(m[-1].group(1))
         return pct / 100, f"{pct}%"
     return 0.0, ""
+
+
+def _extract_metrics_from_lines(lines: list[str]) -> list[dict]:
+    """Parse loss/grad_norm from trainer log lines into plot-ready dicts.
+
+    Handles two formats:
+      MLX:     step=320  epoch=1.70  loss=5.2211  0.11 steps/s
+      PyTorch: {'loss': '1.715', 'grad_norm': '0.0989', 'epoch': '0.32'}
+    """
+    global _loss_step_counter
+    results = []
+    for line in lines:
+        # Skip eval_loss lines (separate metric, not train loss)
+        if "eval_loss" in line and "loss=" not in line.replace("eval_loss", ""):
+            continue
+
+        # MLX format: loss=5.2211
+        loss_m = re.search(r"(?<!['\"\w])loss=([\d.eE+\-]+)", line)
+        # PyTorch format: 'loss': '1.715'  or  "loss": 1.715
+        if not loss_m:
+            loss_m = re.search(r"['\"]loss['\"]\s*:\s*['\"]?([\d.eE+\-]+)['\"]?", line)
+        if not loss_m:
+            continue
+        try:
+            loss = float(loss_m.group(1))
+        except ValueError:
+            continue
+
+        _loss_step_counter += 1
+        # step= (MLX) or 'step': N (PyTorch)
+        step_m = re.search(r"(?<!['\"\w])step=(\d+)", line) or \
+                 re.search(r"['\"]step['\"]\s*:\s*(\d+)", line)
+        epoch_m = re.search(r"(?<!['\"\w])epoch=([\d.]+)", line) or \
+                  re.search(r"['\"]epoch['\"]\s*:\s*['\"]?([\d.]+)['\"]?", line)
+        grad_m = re.search(r"['\"]grad_norm['\"]\s*:\s*['\"]?([\d.eE+\-]+)['\"]?", line)
+
+        step = int(step_m.group(1)) if step_m else _loss_step_counter
+        entry: dict = {"step": step, "loss": loss}
+        if epoch_m:
+            entry["epoch"] = float(epoch_m.group(1))
+        if grad_m:
+            try:
+                entry["grad_norm"] = float(grad_m.group(1))
+            except ValueError:
+                pass
+        results.append(entry)
+    return results
+
+
+def _loss_plot_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+    if not _loss_history:
+        return pd.DataFrame({"step": [0], "loss": [0.0]}), pd.DataFrame({"step": [0], "grad_norm": [0.0]})
+    loss_rows = [{"step": e["step"], "loss": e["loss"]} for e in _loss_history]
+    grad_rows = [{"step": e["step"], "grad_norm": e["grad_norm"]}
+                 for e in _loss_history if "grad_norm" in e]
+    return pd.DataFrame(loss_rows), pd.DataFrame(grad_rows) if grad_rows else pd.DataFrame({"step": [], "grad_norm": []})
 
 
 def _progress_bar_html(fraction: float, label: str, running: bool = True) -> str:
@@ -1198,14 +1370,234 @@ def build_ui():
                     bench_stop_btn   = gr.Button("Stop", variant="stop", scale=1)
                 bench_status = gr.Textbox(value="idle", label="Status", interactive=False)
 
+            # ── Tab 4b: Expert Pipeline ──────────────────────────────────────
+            with gr.Tab("Expert Pipeline"):
+                gr.Markdown(
+                    "**Domain-expert distillation pipeline** — loads any HF dataset, "
+                    "remaps columns, generates Chain-of-Thought rationales via a GGUF "
+                    "teacher (Metal-accelerated), then launches distillation.\n\n"
+                    "Run steps in order: **1 → 2 → 3 → 4**."
+                )
+                ep_progress = gr.HTML(value="")
+
+                # ── Step 1: Dataset & Column Mapping ─────────────────────────
+                _EP_HF_DATASETS = [
+                    # Legal
+                    "nguha/legalbench",
+                    "nelson-liu/legalbench",
+                    # Tax
+                    "Atome-LLM/Tax-Policy-Analysis",
+                    # Medical
+                    "medalpaca/medical_meadow_medical_flashcards",
+                    "medalpaca/medical_meadow_wikidoc",
+                    "pubmed_qa",
+                    # Finance
+                    "gbharti/finance-alpaca",
+                    "FinGPT/fingpt-sentiment-train",
+                    # Coding
+                    "iamtarun/python_code_instructions_18k_alpaca",
+                    "sahil2801/CodeAlpaca-20k",
+                    # General
+                    "yahma/alpaca-cleaned",
+                    "tatsu-lab/alpaca",
+                    "HuggingFaceH4/ultrachat_200k",
+                ]
+                _EP_LOCAL_CANDIDATES = [
+                    "./domain_data/expert_remapped",
+                    "./domain_data/tax",
+                    "./domain_data/legal",
+                    "./domain_data/medical",
+                    "./domain_data/coding",
+                ]
+
+                def _ep_dataset_choices():
+                    local = [p for p in _EP_LOCAL_CANDIDATES
+                             if (PROJECT_DIR / p.lstrip("./")).exists()]
+                    return _EP_HF_DATASETS + local
+
+                with gr.Accordion("Step 1 — Dataset & Column Mapping", open=True):
+                    with gr.Row():
+                        ep_dataset = gr.Dropdown(
+                            choices=_ep_dataset_choices(),
+                            value="",
+                            label="HF Dataset ID or local path",
+                            allow_custom_value=True,
+                            scale=4,
+                        )
+                        ep_dataset_refresh = gr.Button("⟳", scale=0, size="sm", min_width=40)
+                        ep_inspect_btn = gr.Button("Inspect", scale=1, size="sm")
+                    ep_inspect_status = gr.Textbox(
+                        value="", label="Dataset info", interactive=False, lines=2,
+                    )
+                    with gr.Row():
+                        ep_instruction_col = gr.Dropdown(
+                            choices=[], allow_custom_value=True,
+                            label="Instruction column", scale=1,
+                        )
+                        ep_output_col = gr.Dropdown(
+                            choices=[], allow_custom_value=True,
+                            label="Output column", scale=1,
+                        )
+                        ep_input_col = gr.Dropdown(
+                            choices=["(none)"], value="(none)", allow_custom_value=True,
+                            label="Input / context column (optional)", scale=1,
+                        )
+                    with gr.Row():
+                        ep_max_samples_remap = gr.Slider(
+                            100, 50000, value=5000, step=100,
+                            label="Max samples to load",
+                        )
+                        ep_remap_output = gr.Textbox(
+                            value="./domain_data/expert_remapped",
+                            label="Save remapped dataset to",
+                        )
+                    ep_remap_btn = gr.Button("Remap & Save Dataset", variant="primary")
+
+                # ── Step 2: GGUF Teacher ──────────────────────────────────────
+                with gr.Accordion("Step 2 — GGUF Teacher", open=False):
+                    _gguf_choices = sorted(
+                        [str(p) for p in Path("/Users/Shared/llama/models").glob("*.gguf")]
+                    ) if Path("/Users/Shared/llama/models").exists() else []
+                    with gr.Row():
+                        ep_teacher = gr.Dropdown(
+                            choices=_gguf_choices,
+                            value=_gguf_choices[-1] if _gguf_choices else "",
+                            allow_custom_value=True,
+                            label="GGUF teacher model",
+                            scale=3,
+                        )
+                        ep_teacher_refresh = gr.Button("Refresh", scale=1, size="sm")
+                    with gr.Row():
+                        ep_ctx_size   = gr.Slider(1024, 32768, value=8192, step=1024,
+                                                  label="Context size (tokens)")
+                        ep_n_parallel = gr.Slider(1, 8, value=4, step=1,
+                                                  label="Parallel server slots")
+                        ep_cot_temp   = gr.Slider(0.0, 1.5, value=0.3, step=0.05,
+                                                  label="Teacher temperature")
+                        ep_max_tokens = gr.Slider(256, 4096, value=1024, step=128,
+                                                  label="Max tokens per response")
+
+                # ── Step 3: CoT Rationale Generation ─────────────────────────
+                with gr.Accordion("Step 3 — CoT Rationale Generation", open=False):
+                    with gr.Row():
+                        ep_domain = gr.Dropdown(
+                            choices=["tax", "legal", "medical", "finance", "coding", "general"],
+                            value="general",
+                            label="Domain",
+                            scale=1,
+                        )
+                        ep_n_cot = gr.Slider(50, 10000, value=1000, step=50,
+                                             label="Samples to generate", scale=2)
+                    ep_system_prompt = gr.Textbox(
+                        value="",
+                        label="System prompt (leave blank to use domain default)",
+                        lines=6,
+                        placeholder="Leave blank to auto-fill from domain selection…",
+                    )
+                    ep_cot_output = gr.Textbox(
+                        value="./domain_data/expert_cot",
+                        label="CoT output directory",
+                    )
+                    ep_batch_size_cot = gr.Slider(4, 32, value=16, step=4,
+                                                  label="Batch size")
+                    with gr.Row():
+                        ep_cot_btn  = gr.Button("Generate CoT Rationales", variant="primary", scale=3)
+                        ep_cot_stop = gr.Button("Stop", variant="stop", scale=1)
+
+                # ── Step 4: Distillation ──────────────────────────────────────
+                with gr.Accordion("Step 4 — Distillation", open=False):
+                    with gr.Row():
+                        ep_student = gr.Dropdown(
+                            choices=KNOWN_STUDENTS,
+                            value="Qwen/Qwen2-0.5B-Instruct",
+                            allow_custom_value=True,
+                            label="Student model",
+                            scale=2,
+                        )
+                        ep_distill_backend = gr.Dropdown(
+                            choices=["mlx", "pytorch", "unsloth"],
+                            value="mlx",
+                            label="Backend",
+                            scale=1,
+                        )
+                    with gr.Row():
+                        ep_distill_dataset = gr.Textbox(
+                            value="",
+                            label="Dataset path (defaults to CoT output dir above)",
+                            placeholder="Leave blank to use CoT output dir",
+                        )
+                        ep_distill_output = gr.Textbox(
+                            value="./runs/expert-distilled",
+                            label="Output directory",
+                        )
+                    with gr.Row():
+                        ep_epochs   = gr.Slider(1, 5, value=3, step=1, label="Epochs")
+                        ep_lora_r   = gr.Slider(8, 64, value=32, step=8, label="LoRA rank")
+                        ep_max_samp = gr.Slider(500, 10000, value=3000, step=500,
+                                                label="Max training samples")
+                    with gr.Row():
+                        ep_open_chk    = gr.Checkbox(value=True, label="Open models (no HF login)")
+                        ep_offline_chk = gr.Checkbox(value=False, label="Offline mode")
+                    with gr.Row():
+                        ep_distill_btn  = gr.Button("Launch Distillation", variant="primary", scale=3)
+                        ep_distill_stop = gr.Button("Stop", variant="stop", scale=1)
+
+                ep_status = gr.Textbox(value="idle", label="Status", interactive=False)
+
+                # ── Embedded live output ──────────────────────────────────────
+                with gr.Row():
+                    ep_loss_plot = gr.LinePlot(
+                        value=pd.DataFrame({"step": [0], "loss": [0.0]}),
+                        x="step", y="loss",
+                        title="Training Loss",
+                        x_title="Step", y_title="Loss",
+                        height=220, min_width=300,
+                    )
+                    ep_grad_plot = gr.LinePlot(
+                        value=pd.DataFrame({"step": [0], "grad_norm": [0.0]}),
+                        x="step", y="grad_norm",
+                        title="Gradient Norm",
+                        x_title="Step", y_title="Grad Norm",
+                        height=220, min_width=300,
+                    )
+                ep_log_box = gr.Textbox(
+                    value="",
+                    label="Live output",
+                    lines=20,
+                    max_lines=20,
+                    interactive=False,
+                    autoscroll=True,
+                )
+
             # ── Tab 4: Live Logs ─────────────────────────────────────────────
             with gr.Tab("Live Logs"):
                 training_progress = gr.HTML(value="")
+                with gr.Row():
+                    loss_plot = gr.LinePlot(
+                        value=pd.DataFrame({"step": [0], "loss": [0.0]}),
+                        x="step",
+                        y="loss",
+                        title="Training Loss",
+                        x_title="Step",
+                        y_title="Loss",
+                        height=220,
+                        min_width=300,
+                    )
+                    grad_plot = gr.LinePlot(
+                        value=pd.DataFrame({"step": [0], "grad_norm": [0.0]}),
+                        x="step",
+                        y="grad_norm",
+                        title="Gradient Norm",
+                        x_title="Step",
+                        y_title="Grad Norm",
+                        height=220,
+                        min_width=300,
+                    )
                 log_box = gr.Textbox(
                     value="",
                     label="Output",
-                    lines=35,
-                    max_lines=35,
+                    lines=25,
+                    max_lines=25,
                     interactive=False,
                     autoscroll=True,
                 )
@@ -1216,8 +1608,8 @@ def build_ui():
             with gr.Tab("Help"):
                 gr.Markdown("# Distillation Launcher — Operation Guide")
                 gr.Markdown(
-                    "Six tabs: **Configure & Launch** · **Data Prep** · **Domain Synthesis** · "
-                    "**Eval** · **Live Logs** · **Help**. "
+                    "**Seven tabs:** Configure & Launch · Data Prep · Domain Synthesis · "
+                    "Eval · **Expert Pipeline** · Live Logs · Help.  "
                     "A progress bar appears on every tab — no need to switch to Live Logs to monitor a run. "
                     "Click a section below to expand it."
                 )
@@ -1234,7 +1626,7 @@ def build_ui():
 ║ 3  ║ Configure & Launch    ║ Stage: SFT · 1 epoch → sft_checkpoint    ║  ~30 m  ║
 ║ 4  ║ Configure & Launch    ║ Stage: MiniLLM · Student=sft_checkpoint  ║   ~2 h  ║
 ║ 5  ║ Eval                  ║ Perplexity → Quality → WikiText-2        ║  ~15 m  ║
-║ 6  ║ Terminal              ║ export_student_gguf.sh → GGUF            ║   ~5 m  ║
+║ 6  ║ Auto (agent)          ║ ./run_golden.sh → full pipeline headless ║  ~3 h   ║
 ╚════╩═══════════════════════╩══════════════════════════════════════════╩═════════╝
 ```
 
@@ -1242,19 +1634,26 @@ def build_ui():
 recommended before MiniLLM — it gives the student a warm start so GRPO rewards don't
 open negative and stay there.
 
+### One-command golden run (terminal)
+```bash
+./run_golden.sh                                    # foreground
+./run_golden.sh > runs/golden_pipeline.log 2>&1 &  # background with log
+```
+Config is at `configs/golden_pipeline.json` — edit it to change dataset, epochs, LoRA rank, etc.
+
 ---
 
 ### Quickstart (no HF login · ~2 hr)
-1. **Configure & Launch** → Stage: **MiniLLM** · Backend: **MLX** (default) · ☑ **Use open Qwen2 models** → **Launch**
-2. Watch the progress bar on the same tab. Switch to **Live Logs** for the full output stream.
+1. **Configure & Launch** → Stage: **MiniLLM** · Backend: **MLX** · ☑ **Use open Qwen2 models** → **Launch**
+2. Watch progress bar on same tab. Switch to **Live Logs** for full stream + loss/grad charts.
 3. **Eval** → Run Perplexity Eval once training completes.
 
 ---
 
-### When to add SFT warmup (step 3)
+### When to add SFT warmup
 Run SFT first when any of these appear in Live Logs during MiniLLM:
 - `reward` stuck at −1.0 for more than 50 steps
-- `frac_reward_zero_std` > 0.5 after step 30 (all completions tie → no GRPO gradient)
+- `frac_reward_zero_std` > 0.5 after step 30
 - You are using a new domain dataset the student hasn't seen before
 
 After SFT finishes, set the MiniLLM **Student** field to `distilled-minillm/sft_checkpoint`.
@@ -1265,8 +1664,8 @@ After SFT finishes, set the MiniLLM **Student** field to `distilled-minillm/sft_
 | Goal | Recommended path |
 |------|-----------------|
 | Fastest first result | Quickstart (skip steps 1–3) |
-| Best general quality | Full golden pipeline |
-| Domain specialist (coding / math / medical / legal / finance / tax) | Domain Synthesis → SFT → MiniLLM |
+| Best general quality | `./run_golden.sh` |
+| Domain specialist (tax / legal / medical / finance / coding) | **Expert Pipeline** tab |
 | Fastest training on M-series Mac | Backend: **MLX**, batch=2, grad_acc=8 |
 | Largest pair that fits 36 GB unified memory | Teacher ≤ 3B + student ≤ 1B |
 | Resume an interrupted run | MLX: tick **Resume**; PyTorch: relaunch from latest checkpoint |
@@ -1276,11 +1675,15 @@ After SFT finishes, set the MiniLLM **Student** field to `distilled-minillm/sft_
 ### Outputs written to disk
 | File | Contents |
 |------|----------|
-| `output_dir/*.safetensors` | Merged final model weights |
+| `output_dir/*.safetensors` | Merged final model weights (PyTorch backend) |
+| `output_dir/mlx_student_weights.npz` | Trained weights (MLX backend, LoRA + base fused) |
 | `output_dir/metrics.jsonl` | Per-step loss, reward, eval metrics (JSON lines) |
+| `output_dir/train_log.jsonl` | Structured JSON log from agent runs (step, loss, epoch, ts) |
 | `output_dir/sft_labels.jsonl` | Cached teacher labels (SFT reuses on re-run) |
 | `output_dir/quality_metrics.json` | Generation diversity + judge scores |
 | `output_dir/benchmark_results.json` | WikiText-2 perplexity result |
+| `runs/ep_<stage>_<timestamp>.log` | Plain-text log from Expert Pipeline runs |
+| `runs/ep_<stage>_<timestamp>.jsonl` | Structured JSON log from Expert Pipeline runs |
 | `/Users/Shared/llama/models/*.gguf` | GGUF exports for llama.cpp / Ollama |
 """)
 
@@ -1493,14 +1896,179 @@ Evaluates the student on the **WikiText-2-raw-v1** test split — a standard ope
 ```
 """)
 
+                # ── Expert Pipeline help ─────────────────────────────────────
+                with gr.Accordion("Expert Pipeline — Domain-Specific Distillation with CoT", open=False):
+                    gr.Markdown("""
+The **Expert Pipeline** tab implements a 4-step workflow for building domain-specialist models
+(tax, legal, medical, finance, coding) using any HuggingFace dataset and a GGUF teacher model.
+
+---
+
+### Step 1 — Dataset & Column Mapping
+Load any HF dataset and remap its columns to the standard `instruction / input / output` format.
+
+1. Enter the HF dataset ID (e.g. `nelson-liu/legalbench`) or a local path
+2. Click **Inspect** — columns are auto-detected and dropdowns populated
+3. Adjust column assignments if needed
+4. Click **Remap & Save Dataset** → saves to the path in *Save remapped dataset to*
+
+The remapped dataset is saved as an HF dataset on disk **and** as a `remapped.jsonl` for inspection.
+
+**Supported datasets (tested):**
+
+| Dataset | Domain | instruction_col | output_col |
+|---------|--------|-----------------|------------|
+| `Atome-LLM/Tax-Policy-Analysis` | Tax | `question` | `answer` |
+| `nelson-liu/legalbench` | Legal | `instruction` | `output` |
+| `medalpaca/medical_meadow_medical_flashcards` | Medical | `input` | `output` |
+| `yahma/alpaca-cleaned` | General | `instruction` | `output` |
+| `tatsu-lab/alpaca` | General | `instruction` | `output` |
+
+---
+
+### Step 2 — GGUF Teacher
+Select a Metal-accelerated GGUF model from `/Users/Shared/llama/models/` to act as the teacher
+for CoT generation. The model is served via `llama-server` during generation.
+
+| Setting | Guidance |
+|---------|----------|
+| **Context size** | 8192 is safe for most models. Reduce to 4096 if the server OOMs. |
+| **Parallel slots** | 4 keeps the GPU saturated. Reduce to 2 if getting timeouts. |
+| **Temperature** | 0.3 for precise domains (tax, legal, medical). 0.7 for creative/coding. |
+| **Max tokens** | 1024 covers most CoT responses. Increase to 2048 for complex reasoning. |
+
+**Recommended GGUF teachers by domain:**
+
+| Domain | Model | Quant | Why |
+|--------|-------|-------|-----|
+| Tax / Legal (best) | `Meta-Llama-3-70B-Instruct-Q4_K_M.gguf` | Q4_K_M | Strongest reasoning at 70B; fits 36 GB unified |
+| Legal (fast) | `law-chat.Q4_K_M.gguf` | Q4_K_M | Fine-tuned on statutory interpretation |
+| Legal (alt) | `Llama-3-8B-Instruct-Legal-Q8_0.gguf` | Q8_0 | Highest-accuracy 8B legal model |
+| Medical | `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` | Q4_K_M | Best medical reasoning at 8B |
+| Coding | `granite-3.1-8b-instruct-Q4_K_M.gguf` | Q4_K_M | IBM Granite excels at code |
+| General | `Llama-3.2-3B-Instruct-Q4_K_M.gguf` | Q4_K_M | Fast, good general quality |
+
+> **Quantization guide:** Q4_K_M = best balance of size and quality. Q8_0 = highest accuracy, ~2× larger.
+> All GGUF files go to `/Users/Shared/llama/models/` — click **Refresh** in the teacher dropdown to pick them up.
+
+**Downloading GGUF models** — save all files to `/Users/Shared/llama/models/`:
+```bash
+cd /Users/Shared/llama/models
+
+# 70B Llama-3 teacher (bartowski) — best for tax/legal CoT, needs ~42 GB RAM
+curl -L -o Meta-Llama-3-70B-Instruct-Q4_K_M.gguf \\
+  "https://huggingface.co/bartowski/Meta-Llama-3-70B-Instruct-GGUF/resolve/main/Meta-Llama-3-70B-Instruct-Q4_K_M.gguf"
+
+# Law-Chat 7B — statutory interpretation specialist
+curl -L -o law-chat.Q4_K_M.gguf \\
+  "https://huggingface.co/ricdomoliver/law-chat-GGUF/resolve/main/law-chat.Q4_K_M.gguf"
+
+# Llama-3-8B Legal fine-tune (bartowski) — faster alternative
+curl -L -o Llama-3-8B-Instruct-Legal-Q8_0.gguf \\
+  "https://huggingface.co/bartowski/Llama-3-8B-Instruct-Legal-GGUF/resolve/main/Llama-3-8B-Instruct-Legal-Q8_0.gguf"
+```
+> **Note:** Verify the exact repo paths at huggingface.co before downloading — quantizer repos occasionally rename files.
+
+**Downloading datasets:**
+```bash
+# LegalBench (Nguha, ~100 legal reasoning tasks) — use dataset ID in Step 1:
+#   nguha/legalbench
+
+# Tax-Policy-Analysis instruction data — use dataset ID in Step 1:
+#   Atome-LLM/Tax-Policy-Analysis
+
+# Download LegalBench as zip if you need an offline copy:
+curl -L -o legalbench.zip \\
+  "https://huggingface.co/datasets/nguha/legalbench/resolve/main/legalbench.zip"
+
+# Tax parquet (if offline):
+curl -L -o tax_data.parquet \\
+  "https://huggingface.co/datasets/Atome-LLM/Tax-Policy-Analysis/resolve/main/data/train-00000-of-00001.parquet"
+```
+> **Tip:** For online runs just paste the HF dataset ID directly into the *Dataset ID* field — no download needed.
+
+---
+
+### Step 3 — CoT Rationale Generation
+Prompts the GGUF teacher to generate **Chain-of-Thought reasoning traces** for each sample.
+
+Each output is formatted as:
+```
+<reasoning>
+[step-by-step domain analysis]
+</reasoning>
+<answer>
+[final answer]
+</answer>
+```
+
+The domain selector auto-fills a domain-specific system prompt (tax cites IRC sections,
+legal applies statutory tests, medical follows clinical guidelines, etc.). You can override it.
+
+**Output:** `cot_output_dir/cot_data.jsonl` + `cot_output_dir/hf_dataset/`
+
+**Logs saved automatically to:**
+- `runs/ep_cot_<domain>_<timestamp>.log` — plain text
+- `runs/ep_cot_<domain>_<timestamp>.jsonl` — structured JSON (step, loss, ts, msg)
+
+Both the **Training Loss** and **Gradient Norm** charts update live during this step,
+and the full output streams in the **Live output** box below the accordions.
+
+---
+
+### Step 4 — Distillation
+Launches `run_distillation_agent.py` on the CoT dataset. Leave *Dataset path* blank to
+automatically use the `hf_dataset/` produced by Step 3.
+
+**Key settings for domain expert models:**
+
+| Setting | Recommended | Why |
+|---------|-------------|-----|
+| **LoRA rank** | 32 | Higher than default (16) — domain terminology requires more capacity |
+| **Epochs** | 3 | CoT data is dense; 3 epochs ensures thorough absorption |
+| **Backend** | MLX | Fastest on M3 Max; CoT outputs are long so MLX memory efficiency matters |
+
+Distillation logs also save to `runs/ep_distill_<timestamp>.log/.jsonl`.
+
+---
+
+### Full expert pipeline (CLI)
+```bash
+# 1. Remap
+python scripts/expert_pipeline.py --mode remap \\
+    --dataset Atome-LLM/Tax-Policy-Analysis \\
+    --instruction_col question --output_col answer \\
+    --output_dir ./domain_data/tax_expert --max_samples 5000
+
+# 2. Generate CoT (phi-4 teacher, tax domain)
+python scripts/expert_pipeline.py --mode cot \\
+    --dataset ./domain_data/tax_expert \\
+    --teacher /Users/Shared/llama/models/phi-4-Q5_K_M.gguf \\
+    --domain tax --n_samples 2000 \\
+    --output_dir ./domain_data/tax_cot
+
+# 3. Distill
+python scripts/expert_pipeline.py --mode distill \\
+    --dataset ./domain_data/tax_cot/hf_dataset \\
+    --output_dir ./runs/tax-expert \\
+    --backend mlx --open --lora_r 32 --epochs 3
+```
+""")
+
                 # ── Tab 4 help ───────────────────────────────────────────────
                 with gr.Accordion("Live Logs & Progress Bars — Reading Training Output", open=False):
                     gr.Markdown("""
 ### Progress bars
-A compact progress bar appears **on every tab** (Configure & Launch, Data Prep, Domain Synthesis, Eval, and Live Logs). It updates every 2 seconds by parsing the accumulated log output for `Step X/Y`, `Epoch X/Y`, tqdm `75%|` patterns, or `Progress: N%`. The bar turns green when the job finishes. You do not need to switch to the Live Logs tab to see it.
+A compact progress bar appears **on every tab** — updates every 2 seconds by parsing log output
+for `Step X/Y`, `Epoch X/Y`, tqdm `75%|` patterns, or `Progress: N%`. Turns green on completion.
+
+### Loss & Gradient charts
+The **Live Logs** tab and the **Expert Pipeline** tab both show live **Training Loss** and
+**Gradient Norm** line charts, updated every 2 seconds. Both MLX (`step=N  loss=X`) and
+PyTorch (`{'loss': 'X', 'grad_norm': 'Y'}`) log formats are parsed automatically.
 
 ### Log format
-Full training output streams in the Live Logs tab in real time (polled every 2 seconds). Both stdout and stderr from the training process are merged here.
+Full training output streams in real time (polled every 2 seconds). stdout and stderr merged.
 
 ### Key metrics to watch (MiniLLM / GRPO)
 
@@ -1599,6 +2167,23 @@ Also check: if you launched from a tab other than Configure & Launch, only that 
 updates on click; all tabs' progress bars update via the timer once the process writes output.
 """)
 
+                # ── Algorithm Reference ──────────────────────────────────────
+                gr.Markdown("---\n### Algorithm Reference")
+                try:
+                    sys.path.insert(0, str(Path(__file__).parent))
+                    from show_algorithms import ALGORITHMS, build_html as _build_html_help
+                    _help_html = _build_html_help(ALGORITHMS)
+                    _help_b64 = base64.b64encode(_help_html.encode("utf-8")).decode("ascii")
+                    gr.HTML(
+                        f'<div style="border-radius:10px;overflow:hidden;border:1px solid #2a2d3e;">'
+                        f'<iframe src="data:text/html;base64,{_help_b64}" '
+                        f'style="width:100%;height:80vh;border:none;" '
+                        f'sandbox="allow-scripts"></iframe>'
+                        f'</div>'
+                    )
+                except Exception as _e:
+                    gr.Markdown(f"⚠️ Could not load algorithms: `{_e}`")
+
         # ── Stage / backend toggle ────────────────────────────────────────────
         def on_stage_change(s):
             is_sft = s == "SFT"
@@ -1668,7 +2253,7 @@ updates on click; all tabs' progress bars update via the timer once the process 
         ]
         launch_btn.click(fn=launch_run, inputs=all_inputs, outputs=[log_box, run_status])
         stop_btn.click(fn=stop_run, outputs=[log_box, run_status])
-        clear_btn.click(fn=clear_logs, outputs=[log_box, log_status])
+        clear_btn.click(fn=clear_logs, outputs=[log_box, log_status, loss_plot, grad_plot, ep_log_box, ep_loss_plot, ep_grad_plot])
 
         # ── Domain synthesis wiring ──────────────────────────────────────────
         dom_refresh_btn.click(
@@ -1786,6 +2371,147 @@ updates on click; all tabs' progress bars update via the timer once the process 
         )
         bench_stop_btn.click(fn=stop_run, outputs=[log_box, bench_status])
 
+        # ── Expert Pipeline wiring ───────────────────────────────────────────
+
+        def _ep_inspect(dataset_id: str):
+            """Run expert_pipeline.py --mode inspect and parse JSON result."""
+            ds = dataset_id.strip()
+            if not ds or ds == "Enter a dataset ID first.":
+                return ("Enter a dataset ID first.", [], [], ["(none)"])
+            import subprocess as _sp
+            result = _sp.run(
+                [PYTHON, str(SCRIPTS_DIR / "expert_pipeline.py"),
+                 "--mode", "inspect", "--dataset", ds],
+                capture_output=True, text=True, cwd=str(PROJECT_DIR), timeout=120,
+            )
+            raw = result.stdout.strip()
+            if not raw:
+                err = result.stderr[-500:] if result.stderr else "No output"
+                return (f"Inspect failed:\n{err}", [], [], ["(none)"])
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return (f"Could not parse output:\n{raw[:300]}", [], [], ["(none)"])
+            cols = data.get("columns", [])
+            guessed = data.get("guessed", {})
+            info = (f"{data.get('n_rows', '?')} rows  |  columns: {', '.join(cols)}\n"
+                    f"Auto-detected → instruction: {guessed.get('instruction')}  "
+                    f"output: {guessed.get('output')}  input: {guessed.get('input')}")
+            col_choices = cols
+            inst_default = guessed.get("instruction") or (cols[0] if cols else "")
+            out_default  = guessed.get("output") or (cols[1] if len(cols) > 1 else "")
+            input_choices = ["(none)"] + cols
+            input_default = guessed.get("input") or "(none)"
+            return (
+                info,
+                gr.update(choices=col_choices, value=inst_default),
+                gr.update(choices=col_choices, value=out_default),
+                gr.update(choices=input_choices, value=input_default),
+            )
+
+        ep_inspect_btn.click(
+            fn=_ep_inspect,
+            inputs=ep_dataset,
+            outputs=[ep_inspect_status, ep_instruction_col, ep_output_col, ep_input_col],
+        )
+        ep_dataset_refresh.click(
+            fn=lambda: gr.update(choices=_ep_dataset_choices()),
+            outputs=ep_dataset,
+        )
+
+        def _ep_remap(dataset, instruction_col, output_col, input_col, max_samples, output_dir):
+            params = {
+                "mode": "remap",
+                "dataset": dataset,
+                "instruction_col": instruction_col,
+                "output_col": output_col,
+                "output_dir": output_dir,
+            }
+            if input_col and input_col != "(none)":
+                params["input_col"] = input_col
+            if max_samples:
+                params["max_samples"] = int(max_samples)
+            cmd = _build_cmd("expert_pipeline.py", params)
+            return _ep_start_proc(cmd, label="ep_remap")
+
+        ep_remap_btn.click(
+            fn=_ep_remap,
+            inputs=[ep_dataset, ep_instruction_col, ep_output_col, ep_input_col,
+                    ep_max_samples_remap, ep_remap_output],
+            outputs=[log_box, ep_status],
+        )
+
+        def _ep_load_system_prompt(domain: str):
+            import sys as _sys, importlib
+            _sys.path.insert(0, str(SCRIPTS_DIR))
+            ep = importlib.import_module("expert_pipeline")
+            prompt = ep.DOMAIN_SYSTEM_PROMPTS.get(domain, ep.DEFAULT_SYSTEM_PROMPT)
+            return gr.update(placeholder=prompt, value="")
+
+        ep_domain.change(fn=_ep_load_system_prompt, inputs=ep_domain, outputs=ep_system_prompt)
+
+        def _ep_cot(dataset, teacher, domain, system_prompt, n_samples, temperature,
+                    max_tokens, ctx_size, n_parallel, batch_size, output_dir):
+            params = {
+                "mode": "cot",
+                "dataset": dataset,
+                "teacher": teacher,
+                "domain": domain,
+                "n_samples": int(n_samples),
+                "temperature": temperature,
+                "max_tokens": int(max_tokens),
+                "ctx_size": int(ctx_size),
+                "n_parallel": int(n_parallel),
+                "batch_size": int(batch_size),
+                "output_dir": output_dir,
+            }
+            if system_prompt.strip():
+                params["system_prompt"] = system_prompt.strip()
+            cmd = _build_cmd("expert_pipeline.py", params)
+            return _ep_start_proc(cmd, label=f"ep_cot_{domain}")
+
+        ep_cot_btn.click(
+            fn=_ep_cot,
+            inputs=[ep_remap_output, ep_teacher, ep_domain, ep_system_prompt,
+                    ep_n_cot, ep_cot_temp, ep_max_tokens, ep_ctx_size,
+                    ep_n_parallel, ep_batch_size_cot, ep_cot_output],
+            outputs=[log_box, ep_status],
+        )
+        ep_cot_stop.click(fn=stop_run, outputs=[log_box, ep_status])
+
+        def _ep_teacher_refresh():
+            choices = sorted(str(p) for p in Path("/Users/Shared/llama/models").glob("*.gguf")) \
+                if Path("/Users/Shared/llama/models").exists() else []
+            return gr.update(choices=choices)
+
+        ep_teacher_refresh.click(fn=_ep_teacher_refresh, outputs=ep_teacher)
+
+        def _ep_distill(cot_dir, distill_dataset, output_dir, backend, epochs,
+                        lora_r, max_samples, open_flag, offline_flag):
+            dataset = distill_dataset.strip() or f"{cot_dir}/hf_dataset"
+            params = {
+                "mode": "distill",
+                "dataset": dataset,
+                "output_dir": output_dir,
+                "backend": backend,
+                "epochs": int(epochs),
+                "lora_r": int(lora_r),
+                "max_samples": int(max_samples),
+                "open": open_flag,
+                "offline": offline_flag,
+            }
+            cmd = _build_cmd("expert_pipeline.py", params)
+            return _ep_start_proc(cmd, label="ep_distill")
+
+        ep_distill_btn.click(
+            fn=_ep_distill,
+            inputs=[ep_cot_output, ep_distill_dataset, ep_distill_output,
+                    ep_distill_backend, ep_epochs, ep_lora_r, ep_max_samp,
+                    ep_open_chk, ep_offline_chk],
+            outputs=[log_box, ep_status],
+        )
+        ep_distill_stop.click(fn=stop_run, outputs=[log_box, ep_status])
+
         # ── Poll logs every 2 s ──────────────────────────────────────────────
         gr.Timer(value=2).tick(
             fn=poll_logs,
@@ -1797,10 +2523,39 @@ updates on click; all tabs' progress bars update via the timer once the process 
                 domain_progress,    # Domain Synthesis tab
                 eval_progress,      # Eval tab
                 dom_status,         # Domain Synthesis status
+                loss_plot,          # Training loss chart
+                grad_plot,          # Gradient norm chart
+                ep_progress,        # Expert Pipeline tab progress
+                ep_log_box,         # Expert Pipeline embedded log
+                ep_loss_plot,       # Expert Pipeline loss chart
+                ep_grad_plot,       # Expert Pipeline grad norm chart
             ],
         )
 
     return demo
+
+
+def _free_port(port: int) -> None:
+    """Kill any process listening on the given port."""
+    import signal
+    try:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return  # port already free
+    except OSError:
+        return
+    # Port is occupied — find and kill the owner
+    result = subprocess.run(
+        ["lsof", "-ti", f":{port}"], capture_output=True, text=True
+    )
+    for pid_str in result.stdout.split():
+        try:
+            os.kill(int(pid_str), signal.SIGTERM)
+        except (ProcessLookupError, ValueError):
+            pass
+    import time
+    time.sleep(1)
 
 
 def main():
@@ -1808,6 +2563,7 @@ def main():
     p.add_argument("--port", type=int, default=7860)
     p.add_argument("--host", type=str, default="127.0.0.1")
     args = p.parse_args()
+    _free_port(args.port)
     demo = build_ui()
     demo.launch(server_name=args.host, server_port=args.port, share=False,
                 theme=gr.themes.Monochrome())

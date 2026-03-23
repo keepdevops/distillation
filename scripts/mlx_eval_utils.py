@@ -27,11 +27,58 @@ def is_mlx_available() -> bool:
         return False
 
 
-def load_mlx_model(model_path: str):
-    """Load model + tokenizer via mlx-lm. Returns (model, tokenizer)."""
+def load_mlx_model(model_path: str, student_name: str | None = None):
+    """Load model + tokenizer via mlx-lm. Returns (model, tokenizer).
+
+    Handles three cases:
+    1. Normal HF-format dir (has config.json) — load directly.
+    2. MLX training output dir with mlx_q* quantized subdir — load quant.
+    3. MLX training output dir with mlx_student_weights.npz — load base
+       student from HF (name from distill_config.json or student_name arg)
+       then apply the trained NPZ weights.
+    """
+    import json as _json
+    from pathlib import Path as _Path
     from mlx_lm import load
-    logger.info("Loading MLX model from %s", model_path)
-    model, tokenizer = load(str(model_path))
+
+    p = _Path(model_path)
+
+    if not (p / "config.json").exists():
+        # Case 2: quantized subdir present
+        quant_dirs = sorted(p.glob("mlx_q*/"))
+        if quant_dirs:
+            p = quant_dirs[-1]
+            logger.info("Using MLX quantized subdir: %s", p)
+        # Case 3: raw NPZ weights from distill_mlx.py (LoRA-trained)
+        elif (p / "mlx_student_weights.npz").exists():
+            cfg_file = p / "distill_config.json"
+            base_name = None
+            lora_r = 8
+            if cfg_file.exists():
+                cfg = _json.loads(cfg_file.read_text())
+                base_name = cfg.get("student")
+                lora_r = cfg.get("lora_r", 8)
+            base_name = base_name or student_name
+            if not base_name:
+                raise ValueError(
+                    f"MLX training output at {p} has no config.json; pass "
+                    "--student <model-id> so the base architecture can be loaded"
+                )
+            logger.info(
+                "Loading MLX base model %s with LoRA r=%d and applying trained weights",
+                base_name, lora_r,
+            )
+            from mlx_lm.tuner import linear_to_lora_layers
+            model, tokenizer = load(base_name)
+            num_blocks = len(list(model.model.layers)) if hasattr(model, "model") else 24
+            lora_config = {"rank": lora_r, "scale": 20.0, "dropout": 0.0}
+            linear_to_lora_layers(model, num_blocks, lora_config)
+            model.load_weights(str(p / "mlx_student_weights.npz"))
+            model.eval()
+            return model, tokenizer
+
+    logger.info("Loading MLX model from %s", p)
+    model, tokenizer = load(str(p))
     return model, tokenizer
 
 

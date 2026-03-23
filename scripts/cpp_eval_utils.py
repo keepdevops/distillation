@@ -29,19 +29,29 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-LLAMA_BIN_DIR = Path("/Users/Shared/llama/llama.cpp-master/build/bin")
+LLAMA_ROOT = Path("/Users/Shared/llama")
 DEFAULT_N_GPU_LAYERS = 99    # offload all layers to Metal GPU
 DEFAULT_PORT = 8089           # avoid clash with default llama-server port 8080
 DEFAULT_N_PARALLEL = 4        # concurrent completion slots in llama-server
+
+# Candidate locations searched in order for each binary
+_LLAMA_BIN_CANDIDATES = [
+    LLAMA_ROOT,                                        # flat: /Users/Shared/llama/llama-server
+    LLAMA_ROOT / "llama.cpp" / "build" / "bin",       # cmake build
+    LLAMA_ROOT / "llama.cpp-master" / "build" / "bin",
+    LLAMA_ROOT / "build" / "bin",
+]
 
 
 # ── Binary helpers ─────────────────────────────────────────────────────────────
 
 def get_binary(name: str) -> str:
-    p = LLAMA_BIN_DIR / name
-    if not p.exists():
-        raise FileNotFoundError(f"llama.cpp binary not found: {p}")
-    return str(p)
+    for d in _LLAMA_BIN_CANDIDATES:
+        p = d / name
+        if p.exists():
+            return str(p)
+    searched = ", ".join(str(d / name) for d in _LLAMA_BIN_CANDIDATES)
+    raise FileNotFoundError(f"llama.cpp binary '{name}' not found. Searched: {searched}")
 
 
 def is_cpp_available() -> bool:
@@ -185,7 +195,7 @@ class LlamaServer:
             "-m", self.gguf_path,
             "--host", "127.0.0.1",
             "--port", str(self.port),
-            "--ngl", str(self.n_gpu_layers),
+            "-ngl", str(self.n_gpu_layers),
             "--ctx-size", str(self.ctx_size),
             "--parallel", str(self.n_parallel),
             "-t", str(self.threads),
@@ -208,8 +218,18 @@ class LlamaServer:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._proc.poll() is not None:
+                tail = ""
+                if self._log_file:
+                    self._log_file.flush()
+                    log_path = Path(self._log_file.name)
+                    try:
+                        lines = log_path.read_text().splitlines()
+                        tail = "\n".join(lines[-20:])
+                    except Exception:
+                        pass
                 raise RuntimeError(
-                    f"llama-server exited prematurely (rc={self._proc.returncode})"
+                    f"llama-server exited prematurely (rc={self._proc.returncode})\n"
+                    f"Last log lines:\n{tail}"
                 )
             try:
                 with urllib.request.urlopen(url, timeout=2):
@@ -237,8 +257,15 @@ class LlamaServer:
         prompt: str,
         max_tokens: int = 512,
         temperature: float = 0.7,
+        timeout: int | None = None,
     ) -> str:
-        """POST a completion request; returns the generated text only."""
+        """POST a completion request; returns the generated text only.
+
+        timeout defaults to max_tokens * 0.6 + 90 (generous for large models /
+        parallel slots on M3 Max at ~15 tok/s worst-case).
+        """
+        if timeout is None:
+            timeout = max(120, int(max_tokens * 0.6) + 90)
         payload = json.dumps({
             "prompt": prompt,
             "n_predict": max_tokens,
@@ -252,7 +279,7 @@ class LlamaServer:
             data=payload,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())["content"]
 
 

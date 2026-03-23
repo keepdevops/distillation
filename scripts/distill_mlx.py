@@ -173,6 +173,25 @@ def _scale_grads(g, scale):
     return g
 
 
+def _grad_norm(g) -> float:
+    """Compute global L2 gradient norm across all tensors in the gradient tree."""
+    import mlx.core as mx
+    sq_sums = []
+    def _collect(x):
+        if isinstance(x, mx.array):
+            sq_sums.append(mx.sum(x * x))
+        elif isinstance(x, dict):
+            for v in x.values():
+                _collect(v)
+        elif isinstance(x, list):
+            for v in x:
+                _collect(v)
+    _collect(g)
+    if not sq_sums:
+        return 0.0
+    return float(mx.sqrt(mx.sum(mx.stack(sq_sums))))
+
+
 def _memory_safe_precomp_bs(requested_bs: int, seq_len: int, vocab_size: int) -> int:
     """Return a precomp_bs that fits in Metal memory given current model occupancy.
 
@@ -520,6 +539,7 @@ def main():
                 mx.clear_cache()  # free intermediate activations (s_logits, log_probs) after each micro-batch
 
             accum_grads = _scale_grads(accum_grads, 1.0 / grad_acc)
+            gn = _grad_norm(accum_grads)  # float() inside forces eval before grads are freed
             optimizer.update(student_model, accum_grads)
             mx.eval(student_model.parameters(), optimizer.state)
             mx.clear_cache()  # free optimizer intermediates after each optimizer step
@@ -530,12 +550,12 @@ def main():
             if global_step % args.log_steps == 0:
                 elapsed = time.time() - t0
                 LOG.info(
-                    "step=%d  epoch=%.2f  loss=%.4f  %.2f steps/s",
-                    global_step, epoch_frac, accum_loss,
+                    "step=%d  epoch=%.2f  loss=%.4f  grad_norm=%.4f  %.2f steps/s",
+                    global_step, epoch_frac, accum_loss, gn,
                     global_step / max(elapsed, 1e-6),
                 )
-                write_metric(metrics_path, global_step, epoch_frac, loss=accum_loss)
-                log_history.append({"step": global_step, "epoch": epoch_frac, "loss": accum_loss})
+                write_metric(metrics_path, global_step, epoch_frac, loss=accum_loss, grad_norm=gn)
+                log_history.append({"step": global_step, "epoch": epoch_frac, "loss": accum_loss, "grad_norm": gn})
                 _write_trainer_state(trainer_state_path, log_history)
 
             if global_step % args.eval_steps == 0:

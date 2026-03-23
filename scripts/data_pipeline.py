@@ -63,11 +63,21 @@ def load_dataset_split(dataset_path, max_samples=None, cache_dir=None, offline=F
         HF Dataset (train split).
     """
     dataset_p = Path(dataset_path)
-    # If the HF dataset dir doesn't exist, check for a sibling JSONL
-    # (e.g. magpie_synth wrote magpie_raw.jsonl but never converted to hf_dataset/)
+    # Resolve relative paths from the project root if not found from CWD
+    if not dataset_p.is_absolute() and not dataset_p.exists():
+        _root = Path(__file__).parent.parent
+        _alt = _root / dataset_path.lstrip("./")
+        if _alt.exists():
+            dataset_p = _alt
+
+    # If the HF dataset dir doesn't exist, check for sibling JSONL files
+    # (e.g. magpie_synth wrote magpie_raw.jsonl, or expert_pipeline wrote cot_data.jsonl
+    #  before the hf_dataset/ conversion step completed)
     if not dataset_p.exists():
         candidates = [
-            dataset_p.parent / "magpie_raw.jsonl",
+            dataset_p.parent / "cot_data.jsonl",        # expert_pipeline CoT output
+            dataset_p.parent / "remapped.jsonl",         # expert_pipeline remap output
+            dataset_p.parent / "magpie_raw.jsonl",       # magpie_synth output
             dataset_p.with_suffix(".jsonl"),
             dataset_p.parent / (dataset_p.name + ".jsonl"),
         ]
@@ -83,9 +93,22 @@ def load_dataset_split(dataset_path, max_samples=None, cache_dir=None, offline=F
                     ds = ds.select(range(max_samples))
                 return ds
 
+    # Detect local paths: anything starting with . / or an existing path is local-only.
+    # Never route local paths through the HF offline cache logic.
+    _is_local_path = (
+        dataset_path.startswith("./")
+        or dataset_path.startswith("/")
+        or dataset_p.exists()
+    )
+
     if dataset_p.exists():
         from datasets import load_from_disk
-        ds = load_from_disk(dataset_path)
+        ds = load_from_disk(str(dataset_p))
+    elif _is_local_path:
+        raise FileNotFoundError(
+            f"Local dataset path not found: '{dataset_p}'. "
+            "Run the Remap or CoT step first to generate the dataset."
+        )
     elif offline or os.environ.get("HF_DATASETS_OFFLINE") == "1":
         # Try standard HF cache first (works if dataset was previously downloaded)
         try:

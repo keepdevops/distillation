@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -34,8 +35,64 @@ def setup_logging(verbose: bool = False):
     )
 
 
-def run_cmd(cmd: list[str], cwd: Path, env: dict | None = None) -> None:
-    """Run command with live stdout streaming; raise on non-zero exit."""
+_STEP_RE   = re.compile(r"(?<!\w)step=(\d+)")
+_EPOCH_RE  = re.compile(r"(?<!\w)epoch=([\d.]+)")
+_LOSS_RE   = re.compile(r"(?<!\w)loss=([\d.eE+\-]+)")
+_ELOSS_RE  = re.compile(r"(?<!\w)eval_loss=([\d.eE+\-]+)")
+_GRAD_RE   = re.compile(r"['\"]grad_norm['\"]\s*:\s*['\"]?([\d.eE+\-]+)")
+_LR_RE     = re.compile(r"['\"]learning_rate['\"]\s*:\s*['\"]?([\d.eE+\-]+)")
+# PyTorch dict-style: {'loss': '1.715', ...}
+_PT_LOSS_RE = re.compile(r"['\"]loss['\"]\s*:\s*['\"]?([\d.eE+\-]+)")
+_PT_EPOCH_RE = re.compile(r"['\"]epoch['\"]\s*:\s*['\"]?([\d.]+)")
+
+
+def _parse_log_line(line: str) -> dict | None:
+    """Extract structured metrics from a single log line. Returns None if no metrics found."""
+    import time as _time
+    entry: dict = {}
+
+    # MLX format: step=320  epoch=1.70  loss=5.2211
+    m = _STEP_RE.search(line)
+    if m:
+        entry["step"] = int(m.group(1))
+    m = _EPOCH_RE.search(line)
+    if m:
+        entry["epoch"] = float(m.group(1))
+    m = _ELOSS_RE.search(line)
+    if m:
+        entry["eval_loss"] = float(m.group(1))
+    elif (m := _LOSS_RE.search(line)):
+        entry["loss"] = float(m.group(1))
+
+    # PyTorch dict format fallback
+    if "loss" not in entry and "eval_loss" not in entry:
+        m = _PT_LOSS_RE.search(line)
+        if m:
+            entry["loss"] = float(m.group(1))
+        m = _PT_EPOCH_RE.search(line)
+        if m:
+            entry["epoch"] = float(m.group(1))
+
+    if not entry:
+        return None
+
+    m = _GRAD_RE.search(line)
+    if m:
+        entry["grad_norm"] = float(m.group(1))
+    m = _LR_RE.search(line)
+    if m:
+        entry["lr"] = float(m.group(1))
+    entry["ts"] = _time.strftime("%Y-%m-%dT%H:%M:%S")
+    return entry
+
+
+def run_cmd(cmd: list[str], cwd: Path, env: dict | None = None,
+            json_log: Path | None = None) -> None:
+    """Run command with live stdout streaming; raise on non-zero exit.
+
+    If json_log is given, structured metrics parsed from each line are
+    appended as JSON Lines to that file alongside the plain text log.
+    """
     LOG.info("Running: %s", " ".join(cmd))
     env = env or os.environ.copy()
     env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
@@ -44,10 +101,20 @@ def run_cmd(cmd: list[str], cwd: Path, env: dict | None = None) -> None:
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
     )
-    for line in proc.stdout:
-        line = line.rstrip()
-        if line:
-            LOG.info("[subprocess] %s", line)
+    jf = open(json_log, "a") if json_log else None
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                LOG.info("[subprocess] %s", line)
+                if jf:
+                    entry = _parse_log_line(line)
+                    if entry:
+                        jf.write(json.dumps(entry) + "\n")
+                        jf.flush()
+    finally:
+        if jf:
+            jf.close()
     proc.wait()
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed with exit code {proc.returncode}: {' '.join(cmd)}")
@@ -781,7 +848,7 @@ def main():
         distill_cmd = _build_distill_cmd(
             args, output_dir, _sft_checkpoint, _dataset_override, args.seed
         )
-        run_cmd(distill_cmd, project_root)
+        run_cmd(distill_cmd, project_root, json_log=output_dir / "train_log.jsonl")
         _steps_completed.append("distill")
 
     # ── 2. Export ─────────────────────────────────────────────────────────────────
@@ -826,14 +893,16 @@ def main():
     # ── 4. Quality eval (diversity + LLM-as-judge) ───────────────────────────────
     # NOTE: Quality eval only runs on winner (output_dir points to best trial after line 490)
     # This saves 5-10 min per non-winning trial (~20-40 min for 5-trial runs)
-    # MLX saves weights as .npz (not HF format) — eval_quality cannot load them
-    if not args.skip_eval and not args.skip_judge and args.backend != "mlx":
+    # eval_quality.py supports MLX via --backend mlx (sampler API fixed)
+    if not args.skip_eval and not args.skip_judge:
         LOG.info("Running quality eval (diversity + judge) on winning model...")
         quality_cmd = [sys.executable, "scripts/eval_quality.py", str(output_dir)]
         if args.open:
             quality_cmd += ["--student", "Qwen/Qwen2-0.5B-Instruct"]
         if args.offline:
             quality_cmd += ["--offline"]
+        if args.backend == "mlx":
+            quality_cmd += ["--backend", "mlx"]
         if args.compare_teacher:
             quality_cmd += ["--judge"]
             if args.open:

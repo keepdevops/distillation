@@ -455,7 +455,7 @@ def main():
         student, tokenizer = None, None   # generation handled via llama-server subprocess
         logger.info("GGUF student: %s", gguf_student_path)
     elif use_mlx:
-        student, tokenizer = load_mlx_model(checkpoint_dir)
+        student, tokenizer = load_mlx_model(checkpoint_dir, student_name=args.student)
     else:
         student, tokenizer = load_student_model(checkpoint_dir, args.student, cache_dir, offline, device)
 

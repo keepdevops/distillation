@@ -5,9 +5,18 @@ name = "distill"
 platforms = ["osx-arm64"]
 version = "0.1.0"
 
+[activation.env]
+KMP_DUPLICATE_LIB_OK = "TRUE"
+
 [tasks]
 
 [dependencies]
 python = ">=3.14.3,<3.15"
 numpy = ">=2.4.3,<3"
 pip = ">=26.0.1,<27"
+typing_extensions = ">=4.15.0,<5"
+filelock = ">=3.25.2,<4"
+fsspec = ">=2026.2.0,<2027"
+matplotlib = ">=3.10.8,<4"
+networkx = ">=3.6.1,<4"
+sympy = ">=1.14.0,<2"
