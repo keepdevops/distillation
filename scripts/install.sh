@@ -1,6 +1,94 @@
 #!/usr/bin/env bash
-# install.sh — Detect hardware and install distill dependencies accordingly
-# Supports: macOS (Apple Silicon / Intel), Linux (NVIDIA / CPU)
+# install.sh — Setup and install for the distill project
+#
+# Usage:
+#   ./scripts/install.sh                  # full install (deps + env)
+#   ./scripts/install.sh --shared-models  # setup /Users/Shared/models storage
+#   ./scripts/install.sh --thermal-agent  # install thermal agent as LaunchAgent
+#
+# All three options can be combined: ./scripts/install.sh --shared-models --thermal-agent
+
+# ── option parsing ───────────────────────────────────────────────────────────
+SHARED_MODELS=false
+THERMAL_AGENT=false
+FULL_INSTALL=true
+for arg in "$@"; do
+  case "$arg" in
+    --shared-models) SHARED_MODELS=true; FULL_INSTALL=false ;;
+    --thermal-agent) THERMAL_AGENT=true; FULL_INSTALL=false ;;
+  esac
+done
+# If any flag given, still allow combining with full install
+[[ "$SHARED_MODELS" == true || "$THERMAL_AGENT" == true ]] || FULL_INSTALL=true
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── shared models setup ──────────────────────────────────────────────────────
+if [ "$SHARED_MODELS" = true ]; then
+  MODEL_PATH="/Users/Shared/models"
+  echo "=== Shared Model Storage Setup ==="
+  [ -d "$MODEL_PATH" ] || { mkdir -p "$MODEL_PATH"; chmod 755 "$MODEL_PATH"; }
+  echo "  Dir: $MODEL_PATH"
+  ls -lh "$MODEL_PATH" | tail -n +2 | awk '{print "  " $0}'
+  ZSHRC="$HOME/.zshrc"
+  if [ -f "$ZSHRC" ] && ! grep -q "MODEL_PATH=/Users/Shared/models" "$ZSHRC"; then
+    printf '\n# Model storage for distillation\nexport MODEL_PATH=/Users/Shared/models\n' >> "$ZSHRC"
+    echo "  Added MODEL_PATH to ~/.zshrc (reload: source ~/.zshrc)"
+  fi
+  echo "Done."
+fi
+
+# ── thermal agent LaunchAgent ─────────────────────────────────────────────────
+if [ "$THERMAL_AGENT" = true ]; then
+  PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+  LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+  PLIST_NAME="com.distillation.thermal_agent.plist"
+  PLIST_PATH="$LAUNCH_AGENTS/$PLIST_NAME"
+  PYTHON_PATH="${CONDA_PREFIX:+$CONDA_PREFIX/bin/python}"
+  PYTHON_PATH="${PYTHON_PATH:-$(which python3)}"
+  THRESHOLD="${THRESHOLD:-85}"
+  INTERVAL="${INTERVAL:-30}"
+  LOG_FILE="$PROJECT_DIR/thermal_agent.jsonl"
+
+  echo "=== Install Thermal Agent LaunchAgent ==="
+  echo "  Python: $PYTHON_PATH  Threshold: ${THRESHOLD}°C  Interval: ${INTERVAL}s"
+  mkdir -p "$LAUNCH_AGENTS"
+
+  cat > "$PLIST_PATH" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.distillation.thermal_agent</string>
+  <key>ProgramArguments</key><array>
+    <string>$PYTHON_PATH</string>
+    <string>-m</string><string>distill.orchestration.agent</string>
+    <string>--watch</string><string>$PROJECT_DIR</string>
+    <string>--threshold</string><string>$THRESHOLD</string>
+    <string>--interval</string><string>$INTERVAL</string>
+    <string>--log</string><string>$LOG_FILE</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>$PROJECT_DIR/thermal_agent.stdout.log</string>
+  <key>StandardErrorPath</key><string>$PROJECT_DIR/thermal_agent.stderr.log</string>
+  <key>WorkingDirectory</key><string>$PROJECT_DIR</string>
+  <key>Nice</key><integer>10</integer>
+</dict></plist>
+EOF
+
+  launchctl list | grep -q com.distillation.thermal_agent \
+    && launchctl unload "$PLIST_PATH" 2>/dev/null || true
+  launchctl load "$PLIST_PATH"
+  sleep 2
+  launchctl list | grep -q com.distillation.thermal_agent \
+    && echo "  Thermal agent installed and running." \
+    || { echo "  WARNING: agent may not be running. Check: tail -f $PROJECT_DIR/thermal_agent.stderr.log"; exit 1; }
+  echo "  Manage: launchctl unload $PLIST_PATH (stop) | launchctl load $PLIST_PATH (start)"
+fi
+
+[ "$FULL_INSTALL" = false ] && exit 0
+
+# ── full install continues below ──────────────────────────────────────────────
 set -euo pipefail
 
 # ── colours ──────────────────────────────────────────────────────────────────
