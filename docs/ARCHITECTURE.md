@@ -69,8 +69,8 @@ The pipeline has five stages, plus an orthogonal set of optimization phases and 
 For air-gapped or repeated runs, pre-download models and datasets once:
 
 ```bash
-python scripts/cache_models.py --open --output ./hf_cache
-python scripts/cache_datasets.py --output ./datasets_cache --disk
+python -m distill.cache_models --open --output ./hf_cache
+python -m distill.cache_datasets --output ./datasets_cache --disk
 ```
 
 `cache_models.py` uses `snapshot_download()` from `huggingface_hub` to pull all model files (weights, tokenizer, config) into the local HuggingFace cache (`~/.cache/huggingface/hub` or `$HF_HOME/hub`). The directory structure is:
@@ -101,7 +101,7 @@ airgap_bundle/
 ### 0.2 Synthetic Data Augmentation
 
 ```bash
-python scripts/run_distillation_agent.py --open --synthetic_data --n_synthetic 2000
+python -m distill.run_distillation_agent --open --synthetic_data --n_synthetic 2000
 ```
 
 `generate_synthetic_data.py` uses the teacher model to generate instruction-response pairs from seed prompts. The process:
@@ -116,7 +116,7 @@ This is most valuable when the base dataset is small (<1000 samples) or narrow i
 ### 0.3 SFT Warmup (Curriculum Learning)
 
 ```bash
-python scripts/run_distillation_agent.py --open --curriculum --sft_epochs 1 --epochs 2
+python -m distill.run_distillation_agent --open --curriculum --sft_epochs 1 --epochs 2
 ```
 
 `distill_sft.py` runs a supervised fine-tuning pass on the student before knowledge distillation begins. It trains on ground-truth responses using standard cross-entropy loss (not KL divergence).
@@ -186,7 +186,7 @@ Full-vocabulary logits are memory-prohibitive at scale:
 The solution: keep only the top-K logits per token position (default K=50):
 
 ```bash
-python scripts/distill_mlx.py --topk_logits 50
+python -m distill.distill_mlx --topk_logits 50
 ```
 
 Top-50 logits capture >99% of the teacher's probability mass (the long tail of near-zero logits contributes negligible KL signal). Storage becomes:
@@ -274,7 +274,7 @@ At the end of each epoch, the trainer saves:
 Resume from checkpoint with `--resume`:
 
 ```bash
-python scripts/distill_mlx.py --open --resume --output_dir ./distilled-mlx
+python -m distill.distill_mlx --open --resume --output_dir ./distilled-mlx
 ```
 
 The script finds the latest epoch checkpoint and continues from there, loading the optimizer state (for MLX: `Adam` state is serialized alongside weights).
@@ -598,7 +598,7 @@ See [docs/LLAMA_CPP_STUDENT.md](docs/LLAMA_CPP_STUDENT.md) for full llama-server
 **Compute units:**
 
 ```bash
-python scripts/export_coreml.py --model_dir ./distilled --compute_units ALL
+python -m distill.export_coreml --model_dir ./distilled --compute_units ALL
 ```
 
 | Option | Hardware used | Latency | Power |
@@ -625,7 +625,7 @@ The script also prints a Swift inference snippet for the generated model, ready 
 Built into `distill_mlx.py` via `mlx_lm.convert`:
 
 ```bash
-python scripts/distill_mlx.py --open --q_bits 4 --output_dir ./distilled-mlx
+python -m distill.distill_mlx --open --q_bits 4 --output_dir ./distilled-mlx
 # Produces: distilled-mlx/mlx_q4/ (4-bit quantized weights)
 ```
 
@@ -765,10 +765,10 @@ Runs in a separate process alongside training, polling `trainer_state.json` ever
 
 ```bash
 # Terminal 1: Training
-python scripts/distill_mlx.py --open --watchdog --output_dir ./distilled-mlx
+python -m distill.distill_mlx --open --watchdog --output_dir ./distilled-mlx
 
 # Terminal 2: Watchdog
-python scripts/training_watchdog.py ./distilled-mlx --interval 60
+python -m distill.training_watchdog ./distilled-mlx --interval 60
 ```
 
 **Plateau detection:**
@@ -847,7 +847,7 @@ Multi-tab live monitoring UI:
 | Experiments | `experiment_log.jsonl` | Post-run |
 
 ```bash
-python scripts/dashboard.py --port 7860
+python -m distill.dashboard --port 7860
 # Opens at http://127.0.0.1:7860
 ```
 
@@ -860,9 +860,9 @@ Three-phase workflow for secure environments:
 **Phase 1: Stage (online machine)**
 
 ```bash
-python scripts/setup_airgap.py --open   # Or manually:
-python scripts/cache_models.py --open
-python scripts/cache_datasets.py --disk
+python -m distill.setup_airgap --open   # Or manually:
+python -m distill.cache_models --open
+python -m distill.cache_datasets --disk
 conda pack -n distillation_m3 -o distill-offline.tar.gz
 sha256sum distill-offline.tar.gz > SHA256SUMS
 ```
@@ -884,7 +884,7 @@ export HF_HOME=/path/to/hf_cache
 export HF_DATASETS_CACHE=/path/to/datasets_cache
 
 # Run with --offline flag
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
     --open --offline --backend mlx --export gguf
 ```
 
@@ -944,7 +944,7 @@ The `--offline` flag sets `HF_HUB_OFFLINE=1` and `HF_DATASETS_OFFLINE=1`, which 
 
 ```bash
 # Let the agent find best config over 5 trials
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
     --open --offline \
     --n_trials 5 \
     --export all \
@@ -976,8 +976,8 @@ python scripts/run_distillation_agent.py \
 #   → Print: [OK] Perplexity gap 17.3% (acceptable)
 
 # View results
-python scripts/dashboard.py --runs_dir ./distilled-minillm
-python scripts/experiment_log.py --show 10
+python -m distill.dashboard --runs_dir ./distilled-minillm
+python -m distill.experiment_log --show 10
 ```
 
 ---

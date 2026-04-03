@@ -32,7 +32,7 @@ Runs in background, detects loss plateau and divergence. Start this first so it'
 
 ```bash
 cd /Users/caribou/distill
-python scripts/training_watchdog.py \
+python -m distill.training_watchdog \
   ./distilled-mlx \
   --config configs/watchdog_rules.json
 ```
@@ -50,7 +50,7 @@ Two options — choose one:
 The thermal agent monitors all GPU workloads and writes `pause.flag` when temps exceed the threshold (85°C default), then clears it when temps recover.
 
 ```bash
-python scripts/thermal_agent.py \
+python -m distill.thermal_agent \
   --watch . \
   --threshold 85 \
   --interval 30
@@ -67,7 +67,7 @@ Install as always-on LaunchAgent (survives reboots):
 Records CPU/GPU temps to a log file for the dashboard's Thermal tab. No protection.
 
 ```bash
-python scripts/monitor_cpu_gpu_temp.py \
+python -m distill.monitor_cpu_gpu_temp \
   --interval 10 \
   --log ./thermal.log
 ```
@@ -85,7 +85,7 @@ This is the main script — runs the full pipeline end-to-end. Start this after 
 For long multi-trial runs use the production launcher. It automatically wraps itself in a tmux session (`distill-prod`) so the run survives terminal disconnects, and uses `caffeinate -s` to prevent the Mac from sleeping while on AC power:
 
 ```bash
-./run_autonomous_production.sh
+./scripts/run_autonomous_production.sh
 ```
 
 Detach at any time with `Ctrl-B D` and re-attach later with `tmux attach -t distill-prod`.
@@ -97,7 +97,7 @@ Requires `tmux`: `brew install tmux`
 ### Recommended Run (MLX backend — 2–5× faster on M3)
 
 ```bash
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
   --open \
   --backend mlx \
   --epochs 2 \
@@ -110,7 +110,7 @@ python scripts/run_distillation_agent.py \
 ### PyTorch Backend (maximum compatibility)
 
 ```bash
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
   --open \
   --backend pytorch \
   --epochs 2 \
@@ -123,7 +123,7 @@ python scripts/run_distillation_agent.py \
 ### Full Autonomous Run (all features, MLX)
 
 ```bash
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
   --open \
   --backend mlx \
   --epochs 2 \
@@ -139,7 +139,7 @@ python scripts/run_distillation_agent.py \
 ### Multi-Trial Hyperparameter Search
 
 ```bash
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
   --open \
   --backend mlx \
   --n_trials 3 \
@@ -152,7 +152,7 @@ python scripts/run_distillation_agent.py \
 
 ```bash
 # Edit configs/agent_config.json first, then:
-python scripts/run_distillation_agent.py --config configs/agent_config.json
+python -m distill.run_distillation_agent --config configs/agent_config.json
 ```
 
 #### The Agent Pipeline Sequence
@@ -176,7 +176,7 @@ The agent internally runs these scripts in this order, automatically:
 Start this any time — before, during, or after training. It reads live metrics while the agent runs.
 
 ```bash
-python scripts/dashboard.py \
+python -m distill.dashboard \
   --runs_dir . \
   --port 7860
 ```
@@ -255,5 +255,5 @@ PyTorch backend uses `distilled-minillm/` and saves `pytorch_model.bin` / safete
 ### Agent Fails to Start
 
 - Add `--offline` if air-gapped
-- Pre-download models: `python scripts/cache_models.py --open`
+- Pre-download models: `python -m distill.cache_models --open`
 - Check MLX is installed: `python -c "import mlx_lm; print('OK')"`

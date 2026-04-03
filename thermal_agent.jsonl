@@ -11,3 +11,16 @@
 {"timestamp": 1773804856.0831769, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
 {"timestamp": 1773858037.245693, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
 {"timestamp": 1774231430.866105, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1774295381.0765939, "event": "agent_stopped"}
+{"timestamp": 1774295678.861832, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1774672580.888326, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1774715464.502357, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1774716038.151201, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1774835519.3938198, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1774846403.810883, "event": "agent_stopped"}
+{"timestamp": 1774919416.964213, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1775025835.932535, "event": "agent_stopped"}
+{"timestamp": 1775061059.17932, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1775091245.632873, "event": "agent_stopped"}
+{"timestamp": 1775092055.796402, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}
+{"timestamp": 1775144987.689471, "event": "agent_started", "watch_dirs": ["/Users/caribou/distill"], "threshold": 85.0, "metric": "soc_temp_c", "hysteresis": 5.0}

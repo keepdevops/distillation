@@ -162,7 +162,7 @@ cd /path/to/distill
 ### Step 2 — Run a quick test distillation (20 samples, 1 epoch)
 
 ```bash
-python scripts/distill_minillm.py \
+python -m distill.distill_minillm \
   --open \
   --max_samples 20 \
   --epochs 1 \
@@ -188,14 +188,14 @@ ls test-run/
 ### Step 4 — View the loss curve
 
 ```bash
-python scripts/plot_training.py ./test-run -o test-run/curves.png
+python -m distill.plot_training ./test-run -o test-run/curves.png
 open test-run/curves.png
 ```
 
 ### Step 5 — Run a full production distillation
 
 ```bash
-python scripts/distill_minillm.py \
+python -m distill.distill_minillm \
   --open \
   --max_samples 2000 \
   --epochs 2 \
@@ -222,7 +222,7 @@ If you see `ModuleNotFoundError`: `pip install mlx mlx-lm`
 ### Step 2 — Run a quick test
 
 ```bash
-python scripts/distill_mlx.py \
+python -m distill.distill_mlx \
   --open \
   --max_samples 20 \
   --epochs 1 \
@@ -241,7 +241,7 @@ step=4  epoch=0.30  loss=4.56  0.72 steps/s
 ### Step 3 — Run a full MLX distillation
 
 ```bash
-python scripts/distill_mlx.py \
+python -m distill.distill_mlx \
   --open \
   --max_samples 2000 \
   --epochs 2 \
@@ -252,7 +252,7 @@ python scripts/distill_mlx.py \
 ### Step 4 — With MLX quantization (optional, runs after training)
 
 ```bash
-python scripts/distill_mlx.py \
+python -m distill.distill_mlx \
   --open \
   --max_samples 2000 \
   --epochs 2 \
@@ -290,7 +290,7 @@ python -c "import unsloth; print('Unsloth OK')"
 ### Step 3 — Run distillation
 
 ```bash
-python scripts/distill_unsloth.py \
+python -m distill.distill_unsloth \
   --open \
   --max_samples 2000 \
   --epochs 2 \
@@ -305,7 +305,7 @@ python scripts/distill_unsloth.py \
 If Unsloth is not installed, the script exits cleanly:
 
 ```bash
-python scripts/distill_unsloth.py --open
+python -m distill.distill_unsloth --open
 # ERROR: unsloth is not installed.
 # Install instructions: pip install 'unsloth[mlx]'
 # Tip: Use --backend pytorch or --backend mlx if Unsloth is unavailable.
@@ -323,7 +323,7 @@ llama.cpp is pre-installed at `/Users/Shared/llama`. The agent handles conversio
 
 **Automatic (recommended):**
 ```bash
-python scripts/run_distillation_agent.py --open --backend mlx --export gguf
+python -m distill.run_distillation_agent --open --backend mlx --export gguf
 ```
 
 **Manual:**
@@ -349,16 +349,16 @@ GGUF quantization types (smaller = faster inference, slightly lower quality):
 
 ```bash
 # Basic export
-python scripts/export_coreml.py \
+python -m distill.export_coreml \
   --model_dir ./distilled-minillm
 
 # With int4 quantization (~75% smaller)
-python scripts/export_coreml.py \
+python -m distill.export_coreml \
   --model_dir ./distilled-minillm \
   --quantize int4
 
 # Target specific compute units
-python scripts/export_coreml.py \
+python -m distill.export_coreml \
   --model_dir ./distilled-minillm \
   --compute_units ALL         # CPU + GPU + ANE (default)
   # or: CPU_ONLY, CPU_AND_GPU, CPU_AND_NE
@@ -387,7 +387,7 @@ convert('Qwen/Qwen2-0.5B-Instruct', quantize=True, q_bits=4, mlx_path='./mlx_q4'
 "
 
 # Or built into distill_mlx.py (runs automatically unless --no_export)
-python scripts/distill_mlx.py --open --q_bits 4 --output_dir ./distilled-mlx
+python -m distill.distill_mlx --open --q_bits 4 --output_dir ./distilled-mlx
 ```
 
 ---
@@ -400,22 +400,22 @@ The agent chains distillation → export in one command. Use this for unattended
 
 ```bash
 # PyTorch backend + GGUF export (existing behavior, unchanged)
-python scripts/run_distillation_agent.py --open --export gguf
+python -m distill.run_distillation_agent --open --export gguf
 
 # MLX backend + GGUF export
-python scripts/run_distillation_agent.py --open --backend mlx --export gguf
+python -m distill.run_distillation_agent --open --backend mlx --export gguf
 
 # MLX backend + all exports (GGUF + CoreML + MLX quant)
-python scripts/run_distillation_agent.py --open --backend mlx --export all
+python -m distill.run_distillation_agent --open --backend mlx --export all
 
 # Unsloth backend + CoreML export
-python scripts/run_distillation_agent.py --open --backend unsloth --export coreml
+python -m distill.run_distillation_agent --open --backend unsloth --export coreml
 ```
 
 ### 9.2 With watchdog (plateau + thermal protection)
 
 ```bash
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
   --open \
   --backend mlx \
   --export all \
@@ -449,7 +449,7 @@ Edit `configs/agent_config.json`:
 ```
 
 ```bash
-python scripts/run_distillation_agent.py --config configs/agent_config.json
+python -m distill.run_distillation_agent --config configs/agent_config.json
 ```
 
 ### 9.4 All agent flags
@@ -480,7 +480,7 @@ The Gradio dashboard shows live training curves, eval perplexity, artifact sizes
 ### 10.1 Start the dashboard
 
 ```bash
-python scripts/dashboard.py
+python -m distill.dashboard
 # Opens at http://127.0.0.1:7860
 ```
 
@@ -500,14 +500,14 @@ python scripts/dashboard.py
 ### 10.3 Generate a standalone pipeline plot
 
 ```bash
-python scripts/plot_gguf_pipeline.py ./distilled-minillm
+python -m distill.plot_gguf_pipeline ./distilled-minillm
 open distilled-minillm/pipeline_summary.png
 ```
 
 ### 10.4 Plot training curves only
 
 ```bash
-python scripts/plot_training.py ./distilled-minillm -o curves.png
+python -m distill.plot_training ./distilled-minillm -o curves.png
 open curves.png
 ```
 
@@ -547,16 +547,16 @@ The agent starts automatically on login and protects all jobs.
 
 ```bash
 # Watch single job
-python scripts/thermal_agent.py --watch ./distilled-minillm
+python -m distill.thermal_agent --watch ./distilled-minillm
 
 # Watch multiple jobs (system-wide)
-python scripts/thermal_agent.py --watch ./distilled-minillm ./distilled-mlx
+python -m distill.thermal_agent --watch ./distilled-minillm ./distilled-mlx
 
 # Custom threshold (default: 85°C)
-python scripts/thermal_agent.py --watch . --threshold 70 --interval 15
+python -m distill.thermal_agent --watch . --threshold 70 --interval 15
 
 # Daemon mode (background process)
-python scripts/thermal_agent.py --daemon --watch . --log thermal_agent.jsonl
+python -m distill.thermal_agent --daemon --watch . --log thermal_agent.jsonl
 ```
 
 ### 11.4 Fan control GUI
@@ -564,10 +564,10 @@ python scripts/thermal_agent.py --daemon --watch . --log thermal_agent.jsonl
 Manual fan speed control with temperature display:
 
 ```bash
-python scripts/fan_control_popup.py
+python -m distill.fan_control_popup
 
 # With warning threshold
-python scripts/fan_control_popup.py --threshold 75
+python -m distill.fan_control_popup --threshold 75
 ```
 
 **Requirements:** [Macs Fan Control](https://crystalidea.com/macs-fan-control) app installed
@@ -608,10 +608,10 @@ The **training watchdog** monitors `trainer_state.json` during training and writ
 
 ```bash
 # Terminal 1: start training with watchdog support
-python scripts/distill_mlx.py --open --watchdog --output_dir ./distilled-mlx
+python -m distill.distill_mlx --open --watchdog --output_dir ./distilled-mlx
 
 # Terminal 2: run the watchdog
-python scripts/training_watchdog.py ./distilled-mlx --interval 60
+python -m distill.training_watchdog ./distilled-mlx --interval 60
 ```
 
 ### 12.2 C++ watchdog (lighter, no Python)
@@ -703,10 +703,10 @@ Full offline workflow — no internet on the target machine after setup.
 
 ```bash
 # 1. Cache models
-python scripts/cache_models.py --open --output ./hf_cache
+python -m distill.cache_models --open --output ./hf_cache
 
 # 2. Cache datasets
-python scripts/cache_datasets.py --output ./datasets_cache --disk
+python -m distill.cache_datasets --output ./datasets_cache --disk
 
 # 3. Package the conda env
 conda activate distillation_m3
@@ -742,13 +742,13 @@ export HF_DATASETS_CACHE=/path/to/datasets_cache
 
 ```bash
 # PyTorch backend
-python scripts/distill_minillm.py --offline --open --output_dir ./distilled
+python -m distill.distill_minillm --offline --open --output_dir ./distilled
 
 # MLX backend
-python scripts/distill_mlx.py --offline --open --output_dir ./distilled-mlx
+python -m distill.distill_mlx --offline --open --output_dir ./distilled-mlx
 
 # Full agent
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
   --offline --open --backend mlx --export gguf
 ```
 
@@ -817,17 +817,17 @@ Example config with both rules:
 
 | Script | Backend | When to use |
 |--------|---------|-------------|
-| `scripts/distill_minillm.py` | PyTorch/MPS | Existing workflows, maximum compatibility |
-| `scripts/distill_mlx.py` | MLX | Daily use, fastest on M3 |
-| `scripts/distill_unsloth.py` | Unsloth+MLX | Lowest memory, optional install |
-| `scripts/distill_sft.py` | PyTorch/MPS | Supervised fine-tuning |
-| `scripts/distill_forward.py` | PyTorch/MPS | Classification models (BERT, etc.) |
+| `python -m distill.distill_minillm` | PyTorch/MPS | Existing workflows, maximum compatibility |
+| `python -m distill.distill_mlx` | MLX | Daily use, fastest on M3 |
+| `python -m distill.distill_unsloth` | Unsloth+MLX | Lowest memory, optional install |
+| `python -m distill.distill_sft` | PyTorch/MPS | Supervised fine-tuning |
+| `python -m distill.distill_forward` | PyTorch/MPS | Classification models (BERT, etc.) |
 
 ### Export scripts
 
 | Script | Output | When to use |
 |--------|--------|-------------|
-| `scripts/export_coreml.py` | `.mlpackage` | iOS/macOS apps, Apple Neural Engine |
+| `python -m distill.export_coreml` | `.mlpackage` | iOS/macOS apps, Apple Neural Engine |
 | `scripts/export_student_gguf.sh` | `.gguf` | Wrapper for llama.cpp conversion (auto-detects `/Users/Shared/llama`); auto-launches in tmux session `distill-export` |
 | `/Users/Shared/llama/convert_hf_to_gguf.py` | `.gguf` | llama-server, cross-platform inference |
 | `mlx_lm.convert` (built-in) | `mlx_q4/` dir | MLX inference, smallest on Apple Silicon |
@@ -836,39 +836,39 @@ Example config with both rules:
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/run_distillation_agent.py` | End-to-end pipeline: distill → export |
-| `scripts/thermal_agent.py` | System-wide thermal monitoring & protection |
-| `scripts/training_watchdog.py` | Plateau detection (ML-specific) |
-| `scripts/watchdog_callbacks.py` | PauseFlagCallback + MetricsCallback |
+| `python -m distill.run_distillation_agent` | End-to-end pipeline: distill → export |
+| `python -m distill.thermal_agent` | System-wide thermal monitoring & protection |
+| `python -m distill.training_watchdog` | Plateau detection (ML-specific) |
+| `python -m distill.watchdog_callbacks` | PauseFlagCallback + MetricsCallback |
 | `cpp/build/watchdog` | C++ watchdog (no Python) |
 
 ### Thermal monitoring & control
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/monitor_cpu_gpu_temp.py` | Thermal logging via mactop |
-| `scripts/fan_control_popup.py` | Fan control GUI with temp display |
+| `python -m distill.monitor_cpu_gpu_temp` | Thermal logging via mactop |
+| `python -m distill.fan_control_popup` | Fan control GUI with temp display |
 | `scripts/install_thermal_agent.sh` | Install thermal agent as LaunchAgent |
-| `scripts/test_fan_control.py` | Test fan control integration |
+| `python -m distill.test_fan_control` | Test fan control integration |
 
 ### Dashboard & visualization
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/dashboard.py` | Gradio UI: curves + eval + artifacts |
-| `scripts/eval_gradio.py` | Standalone model evaluation UI |
-| `scripts/plot_training.py` | Plot loss/LR curves |
-| `scripts/plot_gguf_pipeline.py` | Full pipeline summary figure |
+| `python -m distill.dashboard` | Gradio UI: curves + eval + artifacts |
+| `python -m distill.eval_gradio` | Standalone model evaluation UI |
+| `python -m distill.plot_training` | Plot loss/LR curves |
+| `python -m distill.plot_gguf_pipeline` | Full pipeline summary figure |
 
 ### Evaluation & quality
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/eval_quality.py` | Quality gates (3 phases): batch gen, refusal detection, length filtering, category balance, embedding diversity, LLM-as-judge |
-| `scripts/early_stopping_callback.py` | Stop training early if loss diverges from baseline (HF Trainer callback) |
-| `scripts/run_eval.py` | Validation perplexity evaluation + teacher comparison |
-| `scripts/run_benchmarks.py` | WikiText-2 benchmark (catastrophic forgetting detection) |
-| `scripts/experiment_log.py` | Agentic memory: log runs, propose next hyperparams, diagnose failures |
+| `python -m distill.eval_quality` | Quality gates (3 phases): batch gen, refusal detection, length filtering, category balance, embedding diversity, LLM-as-judge |
+| `python -m distill.early_stopping_callback` | Stop training early if loss diverges from baseline (HF Trainer callback) |
+| `python -m distill.run_eval` | Validation perplexity evaluation + teacher comparison |
+| `python -m distill.run_benchmarks` | WikiText-2 benchmark (catastrophic forgetting detection) |
+| `python -m distill.experiment_log` | Agentic memory: log runs, propose next hyperparams, diagnose failures |
 
 **Quality gates phases** (run via `eval_quality.py`):
 
@@ -882,13 +882,13 @@ Quick eval commands:
 
 ```bash
 # Fast check (10 samples, ~5 seconds)
-python scripts/eval_quality.py ./distilled-mlx --n_samples 10 --offline
+python -m distill.eval_quality ./distilled-mlx --n_samples 10 --offline
 
 # Standard production eval (50 samples + judge, ~60 seconds)
-python scripts/eval_quality.py ./distilled-mlx --judge --n_samples 50 --offline
+python -m distill.eval_quality ./distilled-mlx --judge --n_samples 50 --offline
 
 # Full eval (all phases, MLX backend, ~2 minutes)
-python scripts/eval_quality.py ./distilled-mlx \
+python -m distill.eval_quality ./distilled-mlx \
     --judge --judge-teacher-ppl \
     --n_samples 100 --batch_size 8 \
     --backend mlx --offline
@@ -900,11 +900,11 @@ See [PRODUCTION_QUALITY_GATES.md](../PRODUCTION_QUALITY_GATES.md) for full quali
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/data_pipeline.py` | Shared dataset loading, prompt formatting, and tokenization utilities |
-| `scripts/cache_models.py` | Pre-download HF models for offline use |
-| `scripts/cache_datasets.py` | Pre-download datasets for offline use |
-| `scripts/setup_airgap.py` | Air-gap setup automation |
-| `scripts/generate_synthetic_data.py` | Synthetic instruction-response data generation (batched, dedup-filtered) |
+| `python -m distill.data_pipeline` | Shared dataset loading, prompt formatting, and tokenization utilities |
+| `python -m distill.cache_models` | Pre-download HF models for offline use |
+| `python -m distill.cache_datasets` | Pre-download datasets for offline use |
+| `python -m distill.setup_airgap` | Air-gap setup automation |
+| `python -m distill.generate_synthetic_data` | Synthetic instruction-response data generation (batched, dedup-filtered) |
 
 ### Service management
 

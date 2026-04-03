@@ -7,8 +7,8 @@ Used by run_distillation_agent.py to:
   - Log full config + metrics after each completed run
 
 Usage (standalone CLI):
-    python scripts/experiment_log.py --show 10
-    python scripts/experiment_log.py --show 5 --log ./experiment_log.jsonl
+    python -m distill.experiment_log --show 10
+    python -m distill.experiment_log --show 5 --log ./experiment_log.jsonl
 """
 from __future__ import annotations
 

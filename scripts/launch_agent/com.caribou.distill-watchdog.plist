@@ -7,7 +7,8 @@
     <key>ProgramArguments</key>
     <array>
         <string>/Users/caribou/conda_envs/distillation_m3/bin/python</string>
-        <string>/Users/caribou/distill/scripts/training_watchdog.py</string>
+        <string>-m</string>
+        <string>distill.training_watchdog</string>
         <string>/Users/caribou/distill/distilled-minillm</string>
         <string>--interval</string>
         <string>60</string>

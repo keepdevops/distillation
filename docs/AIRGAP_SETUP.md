@@ -12,10 +12,10 @@ Cache the Qwen2 models (no HF login needed):
 cd /Users/caribou/distill
 
 # Cache to default HF location (~/.cache/huggingface/)
-python scripts/cache_models.py --open
+python -m distill.cache_models --open
 
 # OR cache to custom location for transfer
-python scripts/cache_models.py --open --output ./hf_cache
+python -m distill.cache_models --open --output ./hf_cache
 ```
 
 This will download:
@@ -30,10 +30,10 @@ This will download:
 
 ```bash
 # Cache to default location
-python scripts/cache_datasets.py
+python -m distill.cache_datasets
 
 # OR cache to custom location with disk copies
-python scripts/cache_datasets.py --output ./datasets_cache --disk
+python -m distill.cache_datasets --output ./datasets_cache --disk
 ```
 
 This will download:
@@ -81,7 +81,7 @@ source ~/.zshrc
 
 ```bash
 # Recommended: MLX backend (2-5× faster on M3)
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
     --open \
     --offline \
     --backend mlx \
@@ -95,14 +95,14 @@ python scripts/run_distillation_agent.py \
 
 ```bash
 # Minimal run (MLX)
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
     --open --offline \
     --backend mlx \
     --epochs 2 \
     --export gguf
 
 # PyTorch backend (maximum compatibility)
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
     --open --offline \
     --backend pytorch \
     --epochs 2 \
@@ -113,7 +113,7 @@ python scripts/run_distillation_agent.py \
     --log_experiment
 
 # With config file
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
     --config configs/agent_config.json \
     --offline
 ```
@@ -145,8 +145,8 @@ If caching on a different machine:
 
 ```bash
 # Cache to portable directory
-python scripts/cache_models.py --open --output ./airgap_transfer/hf_cache
-python scripts/cache_datasets.py --output ./airgap_transfer/datasets_cache --disk
+python -m distill.cache_models --open --output ./airgap_transfer/hf_cache
+python -m distill.cache_datasets --output ./airgap_transfer/datasets_cache --disk
 
 # Compress for transfer
 cd airgap_transfer
@@ -170,7 +170,7 @@ export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
 # Run distillation
-python scripts/run_distillation_agent.py --open --offline --epochs 2 --export gguf
+python -m distill.run_distillation_agent --open --offline --epochs 2 --export gguf
 ```
 
 ---
@@ -233,8 +233,8 @@ du -sh ~/.cache/huggingface/
 
 | Action | Command |
 |--------|---------|
-| Cache models | `python scripts/cache_models.py --open` |
-| Cache datasets | `python scripts/cache_datasets.py` |
+| Cache models | `python -m distill.cache_models --open` |
+| Cache datasets | `python -m distill.cache_datasets` |
 | Run offline | Add `--offline` flag to ALL commands |
 | Set env vars | `export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1` |
 | Check cache | `ls ~/.cache/huggingface/hub/` |
@@ -248,7 +248,7 @@ Before going fully air-gapped, verify:
 
 - [ ] Models cached: `ls ~/.cache/huggingface/hub/ | grep Qwen`
 - [ ] Datasets cached: `ls ~/.cache/huggingface/datasets/ | grep alpaca`
-- [ ] Test run works: `python scripts/run_distillation_agent.py --open --offline --backend mlx --epochs 1 --max_samples 10 --skip_eval --export none`
+- [ ] Test run works: `python -m distill.run_distillation_agent --open --offline --backend mlx --epochs 1 --max_samples 10 --skip_eval --export none`
 - [ ] No network warnings in logs
 - [ ] `--offline` flag added to all commands
 - [ ] Environment variables set (optional but recommended)

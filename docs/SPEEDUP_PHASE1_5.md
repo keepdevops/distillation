@@ -180,7 +180,7 @@ Total: 52 + 5 + (3 × 40) = 177 min (3.0 hours)
 }
 ```
 
-**scripts/distill_minillm.py:**
+**python -m distill.distill_minillm:**
 ```python
 --batch_size default: 8 (was 4)
 --grad_acc default: 8 (was 16)
@@ -202,7 +202,7 @@ EarlyStoppingCallback(check_step=20, divergence_threshold=1.5)
 All optimizations are automatic and default-enabled:
 
 ```bash
-./run_autonomous_production.sh
+./scripts/run_autonomous_production.sh
 ```
 
 **Expected output:**
@@ -264,7 +264,7 @@ if step == 20:  # After ~2-3 minutes
 
 ```bash
 # Run quick test
-python scripts/distill_minillm.py --open --offline --epochs 1 --max_samples 50
+python -m distill.distill_minillm --open --offline --epochs 1 --max_samples 50
 ```
 
 Look for:
@@ -369,7 +369,7 @@ dataloader_prefetch_factor=4,  # Was 2
 **Solution:**
 ```bash
 # Revert to smaller batches
-python scripts/distill_minillm.py \
+python -m distill.distill_minillm \
     --batch_size 4 \
     --grad_acc 16  # Keep effective batch = 64
 ```

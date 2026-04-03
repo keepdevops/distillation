@@ -86,7 +86,7 @@ All 3 quality gate phases implemented (12 major features):
 
 ```bash
 # Batch generation + quality gates (10x faster)
-python scripts/eval_quality.py ./distilled-minillm \
+python -m distill.eval_quality ./distilled-minillm \
     --batch_size 8 \
     --max_new_tokens 512
 ```
@@ -120,7 +120,7 @@ Diversity Summary:
 
 ```bash
 # Complete evaluation with all features
-python scripts/eval_quality.py ./distilled-minillm \
+python -m distill.eval_quality ./distilled-minillm \
     --judge \
     --judge-teacher-ppl \
     --backend mlx \
@@ -142,7 +142,7 @@ python scripts/eval_quality.py ./distilled-minillm \
 ### PyTorch Backend (Non-Apple Silicon)
 
 ```bash
-python scripts/eval_quality.py ./distilled-minillm \
+python -m distill.eval_quality ./distilled-minillm \
     --judge \
     --judge-teacher-ppl \
     --backend pytorch \
@@ -253,7 +253,7 @@ python scripts/eval_quality.py ./distilled-minillm \
 
 ```bash
 # View recent runs with new metrics
-python scripts/experiment_log.py --show 5
+python -m distill.experiment_log --show 5
 ```
 
 **Output:**
@@ -268,7 +268,7 @@ distilled-minillm-20250303-1345  2025-03-03  mlx          2    7.45   20.1    6.
 
 ```bash
 # Diagnose latest run
-python scripts/run_distillation_agent.py --open --offline --epochs 2 --export gguf --log_experiment
+python -m distill.run_distillation_agent --open --offline --epochs 2 --export gguf --log_experiment
 ```
 
 **Diagnostics Output:**

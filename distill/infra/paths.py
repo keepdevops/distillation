@@ -16,5 +16,5 @@ def project_dir() -> Path:
 
 
 def scripts_dir() -> Path:
-    """Legacy `scripts/` dir (shell helpers, optional shims)."""
+    """`scripts/` dir (shell helpers, LaunchAgent assets, etc.)."""
     return project_dir() / "scripts"

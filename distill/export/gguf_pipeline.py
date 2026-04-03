@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 End-to-end pipeline summary figure: training → eval → GGUF file stats → inference speed.
-CLI: python scripts/plot_gguf_pipeline.py ./distilled-minillm
+CLI: python -m distill.plot_gguf_pipeline ./distilled-minillm
 """
 
 import argparse

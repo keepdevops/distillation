@@ -73,13 +73,13 @@ mlx_lm.generate \
 
 ```bash
 # Uses $MODEL_PATH/distilled-minillm by default
-python scripts/eval_gradio.py
+python -m distill.eval_gradio
 
 # Specify different model
-python scripts/eval_gradio.py --model_path $MODEL_PATH/distilled-sft
+python -m distill.eval_gradio --model_path $MODEL_PATH/distilled-sft
 
 # Use cached HF model
-python scripts/eval_gradio.py \
+python -m distill.eval_gradio \
   --model_path $MODEL_PATH/hf_cache/models--bert-large-uncased/snapshots/*
 ```
 
@@ -88,7 +88,7 @@ python scripts/eval_gradio.py \
 ```bash
 # Scans MODEL_PATH for training runs
 export MODEL_PATH=/Users/Shared/models
-python scripts/dashboard.py --runs_dir $MODEL_PATH
+python -m distill.dashboard --runs_dir $MODEL_PATH
 ```
 
 ### Distillation Training
@@ -97,10 +97,10 @@ All distillation scripts now check `MODEL_PATH`:
 
 ```bash
 # Output goes to $MODEL_PATH/distilled-minillm by default
-python scripts/run_distillation_agent.py --open
+python -m distill.run_distillation_agent --open
 
 # Or specify output explicitly
-python scripts/distill_minillm.py \
+python -m distill.distill_minillm \
   --open \
   --output_dir $MODEL_PATH/my-custom-model
 ```
@@ -142,7 +142,7 @@ All users in the `wheel` group can write to `/Users/Shared/`.
 ```bash
 # User: alice
 export MODEL_PATH=/Users/Shared/models
-python scripts/distill_minillm.py \
+python -m distill.distill_minillm \
   --open \
   --output_dir $MODEL_PATH/distilled-by-alice \
   --epochs 2
@@ -153,7 +153,7 @@ python scripts/distill_minillm.py \
 ```bash
 # User: bob
 export MODEL_PATH=/Users/Shared/models
-python scripts/eval_gradio.py \
+python -m distill.eval_gradio \
   --model_path $MODEL_PATH/distilled-by-alice
 ```
 
@@ -189,7 +189,7 @@ base = get_model_base_path()
 ### List Available Models
 
 ```bash
-python scripts/model_path_helper.py
+python -m distill.model_path_helper
 ```
 
 Output:
@@ -266,7 +266,7 @@ export MODEL_PATH=/Users/Shared/models
 echo $MODEL_PATH
 
 # Explicitly pass path
-python scripts/eval_gradio.py --model_path /Users/Shared/models/my-model
+python -m distill.eval_gradio --model_path /Users/Shared/models/my-model
 ```
 
 ### MLX can't find model

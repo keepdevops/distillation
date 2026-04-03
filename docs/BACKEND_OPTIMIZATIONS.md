@@ -83,7 +83,7 @@
 **Installation:**
 ```bash
 pip install mlx mlx-lm
-python scripts/distill_mlx.py --open --offline
+python -m distill.distill_mlx --open --offline
 ```
 
 ---
@@ -108,7 +108,7 @@ python scripts/distill_mlx.py --open --offline
 **Installation:**
 ```bash
 pip install "unsloth[cu121] @ git+https://github.com/unslothai/unsloth.git"
-python scripts/distill_unsloth.py --open
+python -m distill.distill_unsloth --open
 ```
 
 ---
@@ -175,20 +175,20 @@ python scripts/distill_unsloth.py --open
 
 All scripts automatically detect backend and enable/disable optimizations:
 
-**✅ scripts/distill_minillm.py** (PyTorch)
+**✅ python -m distill.distill_minillm** (PyTorch)
 - Detects MPS and disables torch.compile() (compatibility)
 - Detects Flash Attention and enables if available
 - All Phase 1.5 optimizations enabled
 
-**✅ scripts/distill_mlx.py** (MLX)
+**✅ python -m distill.distill_mlx** (MLX)
 - Uses MLX-native optimizations (no Flash Attention needed)
 - Batch tuning, early stopping, quality gates
 
-**✅ scripts/distill_unsloth.py** (Unsloth)
+**✅ python -m distill.distill_unsloth** (Unsloth)
 - Flash Attention integrated via Unsloth
 - All PyTorch optimizations available
 
-**✅ scripts/distill_sft.py** (PyTorch SFT warmup)
+**✅ python -m distill.distill_sft** (PyTorch SFT warmup)
 - Same backend detection as distill_minillm.py
 - Phase 1.5 optimizations for curriculum learning
 
@@ -199,7 +199,7 @@ All scripts automatically detect backend and enable/disable optimizations:
 ### "Flash Attention import error on Mac"
 **Expected.** Flash Attention doesn't work on MPS/MLX. Use MLX backend instead:
 ```bash
-python scripts/distill_mlx.py --open
+python -m distill.distill_mlx --open
 ```
 
 ### "torch.compile() InductorError on MPS"
@@ -218,7 +218,7 @@ git pull origin main
 **Use MLX backend:**
 ```bash
 pip install mlx mlx-lm
-python scripts/distill_mlx.py --open --q_bits 4 --batch_size 8
+python -m distill.distill_mlx --open --q_bits 4 --batch_size 8
 ```
 
 ---

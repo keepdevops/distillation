@@ -9,9 +9,9 @@ Pipeline:
   4. Optional quantization: int4 / int8 / float16
 
 Usage:
-  python scripts/export_coreml.py --model_dir ./distilled-minillm
-  python scripts/export_coreml.py --model_dir ./distilled-minillm --quantize int4
-  python scripts/export_coreml.py --model_dir Qwen/Qwen2-0.5B-Instruct --output_dir ./coreml_out
+  python -m distill.export_coreml --model_dir ./distilled-minillm
+  python -m distill.export_coreml --model_dir ./distilled-minillm --quantize int4
+  python -m distill.export_coreml --model_dir Qwen/Qwen2-0.5B-Instruct --output_dir ./coreml_out
 
 Requirements:
   pip install coremltools>=8.0

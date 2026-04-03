@@ -19,7 +19,7 @@ Single script runs the full workflow. Use for headless runs, cron jobs, or Launc
 - **caffeinate**: Prevents macOS from sleeping while on AC power for the full duration of the run.
 
 ```bash
-./run_autonomous_production.sh
+./scripts/run_autonomous_production.sh
 ```
 
 If tmux is not installed: `brew install tmux`
@@ -36,22 +36,22 @@ Useful tmux commands while the run is active:
 
 ```bash
 # PyTorch → GGUF (original behavior, unchanged)
-python scripts/run_distillation_agent.py --open --export gguf
+python -m distill.run_distillation_agent --open --export gguf
 
 # MLX backend (2-5× faster on M3) → GGUF
-python scripts/run_distillation_agent.py --open --backend mlx --export gguf
+python -m distill.run_distillation_agent --open --backend mlx --export gguf
 
 # MLX → all exports (GGUF + CoreML + MLX quant)
-python scripts/run_distillation_agent.py --open --backend mlx --export all
+python -m distill.run_distillation_agent --open --backend mlx --export all
 
 # With watchdog (plateau detection, pause.flag)
-python scripts/run_distillation_agent.py --open --watchdog --backend mlx --export all
+python -m distill.run_distillation_agent --open --watchdog --backend mlx --export all
 
 # Air-gapped (offline cache only)
-python scripts/run_distillation_agent.py --open --offline --backend mlx --export gguf
+python -m distill.run_distillation_agent --open --offline --backend mlx --export gguf
 
 # Legacy flag still works
-python scripts/run_distillation_agent.py --open --export-gguf
+python -m distill.run_distillation_agent --open --export-gguf
 ```
 
 ### Options
@@ -93,7 +93,7 @@ python scripts/run_distillation_agent.py --open --export-gguf
 ```
 
 ```bash
-python scripts/run_distillation_agent.py --config configs/agent_config.json
+python -m distill.run_distillation_agent --config configs/agent_config.json
 ```
 
 ### LaunchAgent (macOS daemon)
@@ -115,7 +115,8 @@ Example plist for a one-shot run after login:
     <key>ProgramArguments</key>
     <array>
         <string>/path/to/conda/envs/distillation_m3/bin/python</string>
-        <string>/path/to/distill/scripts/run_distillation_agent.py</string>
+        <string>-m</string>
+        <string>distill.run_distillation_agent</string>
         <string>--open</string>
         <string>--export-gguf</string>
     </array>
@@ -141,17 +142,17 @@ Install: `cp com.caribou.distill-agent.plist ~/Library/LaunchAgents/` and `launc
 
 When `--watchdog` is set:
 
-- The **Python watchdog** (`scripts/training_watchdog.py`) or **C++ watchdog** (`cpp/build/watchdog`) monitors `trainer_state.json` during training
+- The **Python watchdog** (`python -m distill.training_watchdog`) or **C++ watchdog** (`cpp/build/watchdog`) monitors `trainer_state.json` during training
 - On plateau, it writes `watchdog_suggestions.json` (e.g. `next_lr_scale`)
 - On thermal/emergency, it writes `pause.flag` → trainer saves and exits
 - Run the watchdog **in parallel** with distillation (separate terminal or LaunchAgent)
 
 ```bash
 # Terminal 1: start distillation with watchdog support
-python scripts/run_distillation_agent.py --open --watchdog
+python -m distill.run_distillation_agent --open --watchdog
 
 # Terminal 2: run watchdog (polls every 60s)
-python scripts/training_watchdog.py ./distilled-minillm --interval 60
+python -m distill.training_watchdog ./distilled-minillm --interval 60
 ```
 
 Or use the existing [LaunchAgent for the watchdog](scripts/launch_agent/README.md).

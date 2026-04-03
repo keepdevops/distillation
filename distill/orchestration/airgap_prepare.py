@@ -190,5 +190,5 @@ def cmd_prepare(args) -> None:
         log.info("  %s/SHA256SUMS", output)
     log.info("")
     log.info("On target, run:")
-    log.info("  python scripts/airgap.py run --bundle <path> --open%s",
+    log.info("  python -m distill.airgap run --bundle <path> --open%s",
              " --backend mlx" if args.open else "")

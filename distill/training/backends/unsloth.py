@@ -8,8 +8,8 @@ and mlx-lm for the frozen teacher. Injects KD loss into trl.SFTTrainer.
 Same pause.flag + metrics.jsonl protocol as other backends → dashboard unchanged.
 
 Usage:
-  python scripts/distill_unsloth.py --open --max_samples 100 --epochs 1
-  python scripts/distill_unsloth.py --teacher Qwen/Qwen2-1.5B-Instruct \\
+  python -m distill.distill_unsloth --open --max_samples 100 --epochs 1
+  python -m distill.distill_unsloth --teacher Qwen/Qwen2-1.5B-Instruct \\
       --student Qwen/Qwen2-0.5B-Instruct --output_dir ./distilled-unsloth
 
 Requirements (optional):

@@ -21,7 +21,7 @@ pip install mlx-lm
 
 ```bash
 # 10 samples, no judge, ~5 seconds
-python scripts/eval_quality.py ./distilled-minillm \
+python -m distill.eval_quality ./distilled-minillm \
     --n_samples 10 \
     --offline
 ```
@@ -30,7 +30,7 @@ python scripts/eval_quality.py ./distilled-minillm \
 
 ```bash
 # 50 samples + judge, ~60 seconds
-python scripts/eval_quality.py ./distilled-minillm \
+python -m distill.eval_quality ./distilled-minillm \
     --judge \
     --n_samples 50 \
     --offline
@@ -40,7 +40,7 @@ python scripts/eval_quality.py ./distilled-minillm \
 
 ```bash
 # 100 samples + all metrics, ~2 minutes
-python scripts/eval_quality.py ./distilled-minillm \
+python -m distill.eval_quality ./distilled-minillm \
     --judge \
     --judge-teacher-ppl \
     --n_samples 100 \
@@ -112,7 +112,7 @@ No changes needed! The agent already calls eval_quality.py.
 
 To enable judge scoring:
 ```bash
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
     --open --offline --epochs 2 \
     --export gguf \
     --log_experiment \

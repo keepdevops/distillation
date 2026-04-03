@@ -3,12 +3,12 @@
 Air-gapped distillation — single entry point.
 
 STAGING (online, run once):
-  python scripts/airgap.py prepare --open --output ./airgap_bundle
-  python scripts/airgap.py prepare --open --output ./airgap_bundle --pack-env
+  python -m distill.airgap prepare --open --output ./airgap_bundle
+  python -m distill.airgap prepare --open --output ./airgap_bundle --pack-env
 
 TARGET (offline):
-  python scripts/airgap.py run --bundle ./airgap_bundle --open
-  python scripts/airgap.py run --bundle ./airgap_bundle --open --backend mlx --export gguf
+  python -m distill.airgap run --bundle ./airgap_bundle --open
+  python -m distill.airgap run --bundle ./airgap_bundle --open --backend mlx --export gguf
 """
 
 import argparse

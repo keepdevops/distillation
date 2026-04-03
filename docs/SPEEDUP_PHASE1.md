@@ -146,7 +146,7 @@ Total: 60 + (4 × 46) = 244 min (4.1 hours)
 All optimizations are now default and automatic:
 
 ```bash
-./run_autonomous_production.sh
+./scripts/run_autonomous_production.sh
 ```
 
 No changes needed! The script automatically:
@@ -162,7 +162,7 @@ If you want to disable optimizations:
 
 ```bash
 # Disable eval_steps optimization (more granular curves)
-python scripts/distill_minillm.py \
+python -m distill.distill_minillm \
     --open --offline \
     --epochs 2 \
     --eval_steps 1  # Evaluate every step (slower)
@@ -210,7 +210,7 @@ Expected output: `PyTorch 2.1.0` or higher
 Check that optimizations are active:
 
 ```bash
-python scripts/distill_minillm.py --open --offline --epochs 1 --max_samples 10
+python -m distill.distill_minillm --open --offline --epochs 1 --max_samples 10
 ```
 
 Expected output:
@@ -305,7 +305,7 @@ If you want even more speedup:
 
 ```bash
 # Pre-compute teacher outputs (one-time, ~40 min)
-python scripts/cache_teacher_logits.py --open --offline
+python -m distill.cache_teacher_logits --open --offline
 
 # Then distillation uses cached logits (saves 20-25 min/trial)
 ```
@@ -340,7 +340,7 @@ pip install flash-attn --no-build-isolation
 
 **Usage (Automatic):**
 ```bash
-./run_autonomous_production.sh
+./scripts/run_autonomous_production.sh
 ```
 
 **Expected Runtime:**

@@ -8,9 +8,9 @@ Optional automatic fan control via Macs Fan Control CLI (if installed):
   The app must be running for fan control to take effect.
 
 Usage:
-  python scripts/monitor_cpu_gpu_temp.py
-  python scripts/monitor_cpu_gpu_temp.py --interval 3 --log thermal.log
-  python scripts/monitor_cpu_gpu_temp.py --fan-threshold 75 --fan-max-temp 90
+  python -m distill.monitor_cpu_gpu_temp
+  python -m distill.monitor_cpu_gpu_temp --interval 3 --log thermal.log
+  python -m distill.monitor_cpu_gpu_temp --fan-threshold 75 --fan-max-temp 90
 """
 
 import argparse

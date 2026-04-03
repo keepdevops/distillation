@@ -139,20 +139,20 @@ Behavior:
 
 ```bash
 # Watch single job
-python scripts/thermal_agent.py --watch ./distilled-minillm
+python -m distill.thermal_agent --watch ./distilled-minillm
 
 # Watch multiple jobs (system-wide)
-python scripts/thermal_agent.py --watch ./distilled-minillm ./distilled-mlx
+python -m distill.thermal_agent --watch ./distilled-minillm ./distilled-mlx
 
 # Custom threshold
-python scripts/thermal_agent.py --watch . --threshold 70 --interval 15
+python -m distill.thermal_agent --watch . --threshold 70 --interval 15
 ```
 
 ### Option 2: Daemon Mode (Background process)
 
 ```bash
 # Run in background
-python scripts/thermal_agent.py --daemon --watch . --log thermal_agent.jsonl
+python -m distill.thermal_agent --daemon --watch . --log thermal_agent.jsonl
 
 # Check if running
 ps aux | grep thermal_agent
@@ -282,7 +282,7 @@ Scenario 3: Both agents active
 
 ```bash
 # Enable logging
-python scripts/thermal_agent.py --watch . --log thermal_agent.jsonl
+python -m distill.thermal_agent --watch . --log thermal_agent.jsonl
 
 # View events
 tail -f thermal_agent.jsonl | jq
@@ -300,7 +300,7 @@ tail -f thermal_agent.jsonl | jq
 
 ```bash
 # Watch stdout (if not daemon)
-python scripts/thermal_agent.py --watch .
+python -m distill.thermal_agent --watch .
 
 # LaunchAgent logs
 tail -f thermal_agent.stdout.log
@@ -318,10 +318,10 @@ tail -f thermal_agent.stderr.log
 
 ```bash
 # Terminal 1: Start thermal agent
-python scripts/thermal_agent.py --watch ./distilled-minillm --threshold 80
+python -m distill.thermal_agent --watch ./distilled-minillm --threshold 80
 
 # Terminal 2: Run training
-python scripts/distill_minillm.py --open --watchdog
+python -m distill.distill_minillm --open --watchdog
 ```
 
 **Behavior:**
@@ -335,16 +335,16 @@ python scripts/distill_minillm.py --open --watchdog
 
 ```bash
 # Terminal 1: Start thermal agent (one instance)
-python scripts/thermal_agent.py --watch ./distilled-minillm ./distilled-mlx ./distilled-sft
+python -m distill.thermal_agent --watch ./distilled-minillm ./distilled-mlx ./distilled-sft
 
 # Terminal 2: Run training job 1
-python scripts/distill_mlx.py --open --watchdog &
+python -m distill.distill_mlx --open --watchdog &
 
 # Terminal 3: Run training job 2
-python scripts/distill_sft.py --open --watchdog &
+python -m distill.distill_sft --open --watchdog &
 
 # Terminal 4: Run benchmarks (no --watchdog flag for run_benchmarks.py)
-python scripts/run_benchmarks.py ./model &
+python -m distill.run_benchmarks ./model &
 ```
 
 **Behavior:**
@@ -360,8 +360,8 @@ python scripts/run_benchmarks.py ./model &
 ./scripts/install_thermal_agent.sh
 
 # Run jobs anytime - thermal protection automatic
-python scripts/distill_mlx.py --open --watchdog
-python scripts/eval_quality.py ./model
+python -m distill.distill_mlx --open --watchdog
+python -m distill.eval_quality ./model
 ./scripts/export_student_gguf.sh ./model
 
 # All jobs protected automatically
@@ -375,10 +375,10 @@ python scripts/eval_quality.py ./model
 brew install context-labs/tap/mactop
 
 # Start thermal agent
-python scripts/thermal_agent.py --watch . --threshold 85 --log thermal.jsonl
+python -m distill.thermal_agent --watch . --threshold 85 --log thermal.jsonl
 
 # Run offline distillation
-./run_autonomous_production.sh
+./scripts/run_autonomous_production.sh
 ```
 
 ---
@@ -444,7 +444,7 @@ mactop --headless --format json --count 1 | jq '.soc_temp'
 pkill -f thermal_agent.py
 
 # Restart one instance
-python scripts/thermal_agent.py --watch .
+python -m distill.thermal_agent --watch .
 
 # Or use LaunchAgent (ensures single instance)
 launchctl load ~/Library/LaunchAgents/com.distillation.thermal_agent.plist
@@ -458,13 +458,13 @@ All training scripts support pause.flag via `PauseFlagCallback`:
 
 ```python
 # Already integrated in:
-# - scripts/distill_minillm.py (--watchdog flag)
-# - scripts/distill_sft.py (--watchdog flag)
-# - scripts/distill_mlx.py (built-in)
-# - scripts/run_distillation_agent.py (--watchdog flag)
+# - python -m distill.distill_minillm (--watchdog flag)
+# - python -m distill.distill_sft (--watchdog flag)
+# - python -m distill.distill_mlx (built-in)
+# - python -m distill.run_distillation_agent (--watchdog flag)
 
 # Example usage:
-python scripts/distill_minillm.py --open --watchdog
+python -m distill.distill_minillm --open --watchdog
 ```
 
 **How it works:**
@@ -541,10 +541,10 @@ python scripts/distill_minillm.py --open --watchdog
 
 ```bash
 # Option 1: Manual (run in terminal)
-python scripts/thermal_agent.py --watch .
+python -m distill.thermal_agent --watch .
 
 # Option 2: Daemon (background process)
-python scripts/thermal_agent.py --daemon --watch . --log thermal.jsonl
+python -m distill.thermal_agent --daemon --watch . --log thermal.jsonl
 ```
 
 LaunchAgent is recommended for always-on protection but is entirely optional.
@@ -563,7 +563,7 @@ training_watchdog.py (165 lines)
   └── Only runs during training
 
 Usage:
-  python scripts/distill_minillm.py --watchdog
+  python -m distill.distill_minillm --watchdog
   # Must remember --watchdog flag
   # Only protects that one job
   # Stops when training stops
@@ -588,9 +588,9 @@ Usage:
   ./scripts/install_thermal_agent.sh
 
   # Run any jobs - automatic protection
-  python scripts/distill_minillm.py --open
-  python scripts/eval_quality.py ./model
-  python scripts/export_gguf.sh ./model
+  python -m distill.distill_minillm --open
+  python -m distill.eval_quality ./model
+  bash scripts/export_student_gguf.sh ./model
 
   # All jobs protected automatically!
 ```
@@ -609,7 +609,7 @@ Usage:
 - **mactop**: https://github.com/context-labs/mactop (Apple Silicon monitoring)
 - **LaunchAgent**: https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html
 - **training_watchdog.py**: ML-specific monitoring (plateau detection)
-- **PauseFlagCallback**: scripts/watchdog_callbacks.py
+- **PauseFlagCallback**: module `distill.watchdog_callbacks`
 
 ---
 

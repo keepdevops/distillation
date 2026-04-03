@@ -4,9 +4,9 @@ Standalone eval: compute cross-entropy loss on the validation split and
 append eval_loss + perplexity to {output_dir}/metrics.jsonl.
 
 Usage:
-    python scripts/run_eval.py ./distilled-minillm
-    python scripts/run_eval.py ./distilled-minillm --checkpoint ./distilled-minillm/checkpoint-80
-    python scripts/run_eval.py ./distilled-minillm --step 90
+    python -m distill.run_eval ./distilled-minillm
+    python -m distill.run_eval ./distilled-minillm --checkpoint ./distilled-minillm/checkpoint-80
+    python -m distill.run_eval ./distilled-minillm --step 90
 """
 
 import argparse

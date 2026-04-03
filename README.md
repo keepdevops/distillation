@@ -75,6 +75,8 @@ rather than fitting hard labels, capturing nuance that simple fine-tuning cannot
 
 ## Architecture
 
+Long-form design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Documentation index: [docs/INDEX.md](docs/INDEX.md).
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     run_distillation_agent.py                           │
@@ -155,21 +157,21 @@ rather than fitting hard labels, capturing nuance that simple fine-tuning cannot
 # Clone and install
 git clone <repo>
 cd distill
-./install.sh           # auto-detects Apple Silicon / NVIDIA / CPU
+./scripts/install.sh   # auto-detects Apple Silicon / NVIDIA / CPU
 
 # One-command golden production run (~3 hours on M3 Max)
 bash scripts/run_golden.sh
 
 # Headless MLX run (recommended for M3 Max, no UI needed)
-pixi run python scripts/run_distillation_agent.py \
+pixi run python -m distill.run_distillation_agent \
   --open --backend mlx --export all --curriculum --watchdog
 
 # Launch the full Gradio UI
-pixi run python scripts/launch_ui.py
+pixi run python -m distill.launch_ui
 # → http://127.0.0.1:7861
 
 # Quick smoke test (10 samples, ~5 min)
-pixi run python scripts/run_distillation_agent.py \
+pixi run python -m distill.run_distillation_agent \
   --open --backend mlx --max_samples 10 --epochs 1 \
   --skip_eval --export none
 ```
@@ -178,10 +180,10 @@ pixi run python scripts/run_distillation_agent.py \
 
 ## Installation
 
-`install.sh` detects your hardware and installs the appropriate packages automatically:
+`scripts/install.sh` detects your hardware and installs the appropriate packages automatically:
 
 ```bash
-./install.sh
+./scripts/install.sh
 ```
 
 **Detection logic:**
@@ -220,7 +222,7 @@ pixi run pip install "transformers>=4.38" "datasets>=2.14" "trl>=0.10" \
 
 ### MLX — Forward KL
 
-**Script:** `scripts/distill_mlx.py`
+**Module:** `distill.distill_mlx` (`python -m distill.distill_mlx`)
 **Best for:** Apple Silicon — 2–5× faster than PyTorch/MPS
 
 Teacher logits are pre-computed once as top-K sparse tensors (~300 MB vs ~311 GB
@@ -234,7 +236,7 @@ L_KD = D_KL(p_teacher ‖ p_student)    [forward KL — mean-seeking]
 ```
 
 ```bash
-pixi run python scripts/distill_mlx.py \
+pixi run python -m distill.distill_mlx \
   --teacher Qwen/Qwen2-1.5B-Instruct \
   --student Qwen/Qwen2-0.5B \
   --output_dir ./distilled-mlx \
@@ -272,7 +274,7 @@ pixi run python scripts/distill_mlx.py \
 
 ### MiniLLM — Reverse KL / GRPO
 
-**Script:** `scripts/distill_minillm.py`
+**Module:** `distill.distill_minillm` (`python -m distill.distill_minillm`)
 **Best for:** Highest quality distillation; PyTorch/MPS backend
 
 Trains via **Group Relative Policy Optimization (GRPO)**: sample G completions per
@@ -286,7 +288,7 @@ Reward: +0.5 (clean EOS)  −0.5 (clipped)  −1.0 (< 10 tokens, collapse)
 ```
 
 ```bash
-pixi run python scripts/distill_minillm.py \
+pixi run python -m distill.distill_minillm \
   --teacher Qwen/Qwen2-1.5B-Instruct \
   --student Qwen/Qwen2-0.5B \
   --output_dir ./distilled-minillm \
@@ -332,7 +334,7 @@ pixi run python scripts/distill_minillm.py \
 
 ### SFT Warmup (Stage 1)
 
-**Script:** `scripts/distill_sft.py`
+**Module:** `distill.distill_sft` (`python -m distill.distill_sft`)
 **Purpose:** Curriculum step before MiniLLM to prevent cold-start reward collapse
 
 Teacher generates greedy completions; student minimises cross-entropy on response
@@ -340,7 +342,7 @@ tokens only (prompt + padding masked to −100). Teacher labels are cached to
 `sft_labels.jsonl` and reused on reruns.
 
 ```bash
-pixi run python scripts/distill_sft.py \
+pixi run python -m distill.distill_sft \
   --teacher Qwen/Qwen2-1.5B-Instruct \
   --student Qwen/Qwen2-0.5B \
   --output_dir ./distilled-sft \
@@ -360,14 +362,14 @@ After SFT finishes, point MiniLLM's `--student` at `distilled-minillm/sft_checkp
 
 ### Forward KD for Classification
 
-**Script:** `scripts/distill_forward.py`
+**Module:** `distill.distill_forward` (`python -m distill.distill_forward`)
 **Purpose:** Vanilla temperature-scaled KD for encoder classification models (BERT, DistilBERT)
 
 Combines soft targets (temperature-scaled teacher logits) with hard cross-entropy
 on GLUE / custom classification datasets. Not for causal LLMs.
 
 ```bash
-pixi run python scripts/distill_forward.py \
+pixi run python -m distill.distill_forward \
   --teacher bert-base-uncased \
   --student distilbert-base-uncased \
   --dataset glue --dataset_config sst2 \
@@ -378,13 +380,13 @@ pixi run python scripts/distill_forward.py \
 
 ## Orchestrator — Autonomous Pipeline
 
-**Script:** `scripts/run_distillation_agent.py`
+**Module:** `distill.run_distillation_agent` (`python -m distill.run_distillation_agent`)
 
 Runs all stages end-to-end, streams live metrics, supports multi-trial hyperparameter
 search, and logs every run to `experiment_log.jsonl`.
 
 ```bash
-pixi run python scripts/run_distillation_agent.py \
+pixi run python -m distill.run_distillation_agent \
   --open \
   --backend mlx \
   --export all \
@@ -432,7 +434,7 @@ writes hyperparameter suggestions for the next run.
 
 ### Dataset Formats
 
-**Script:** `scripts/data_pipeline.py`
+**Module:** `distill.data_pipeline` (`python -m distill.data_pipeline`)
 
 Auto-detects schema and normalises to `instruction / input / output` triples.
 
@@ -462,14 +464,14 @@ Applied automatically during dataset loading:
 
 ### Magpie Synthesis
 
-**Script:** `scripts/magpie_synth.py`
+**Module:** `distill.magpie_synth` (`python -m distill.magpie_synth`)
 
 Generates synthetic instruction-response pairs by conditioning the teacher on the
 chat-template user-turn prefix. The model auto-completes a realistic user question
 and then generates the answer. No seed dataset required (Xu et al., 2024).
 
 ```bash
-pixi run python scripts/magpie_synth.py \
+pixi run python -m distill.magpie_synth \
   --teacher Qwen/Qwen2-1.5B-Instruct \
   --domain math \
   --n 10000 \
@@ -501,12 +503,12 @@ pixi run python scripts/magpie_synth.py \
 
 ### Dataset Filtering
 
-**Script:** `scripts/filter_dataset.py`
+**Module:** `distill.filter_dataset` (`python -m distill.filter_dataset`)
 
 Reduces a raw dataset to a high-quality subset using composite scoring and near-dedup.
 
 ```bash
-pixi run python scripts/filter_dataset.py \
+pixi run python -m distill.filter_dataset \
   --dataset teknium/OpenHermes-2.5 \
   --output_dir ./filtered_data \
   --target 8000
@@ -519,25 +521,25 @@ near-dedup, optional teacher NLL re-ranking.
 
 ## Expert Pipeline — Domain Distillation with CoT
 
-**Script:** `scripts/expert_pipeline.py`
+**Module:** `distill.expert_pipeline` (`python -m distill.expert_pipeline`)
 
 Builds domain-specialist models (tax, legal, medical, finance, coding) in four steps:
 remap a dataset → generate Chain-of-Thought rationales via a GGUF teacher → distill.
 
 ```bash
 # 1. Inspect dataset columns
-pixi run python scripts/expert_pipeline.py \
+pixi run python -m distill.expert_pipeline \
   --mode inspect --dataset nelson-liu/legalbench
 
 # 2. Remap columns to instruction/input/output
-pixi run python scripts/expert_pipeline.py \
+pixi run python -m distill.expert_pipeline \
   --mode remap \
   --dataset Atome-LLM/Tax-Policy-Analysis \
   --instruction_col question --output_col answer \
   --output_dir ./domain_data/tax
 
 # 3. Generate CoT rationales via GGUF teacher
-pixi run python scripts/expert_pipeline.py \
+pixi run python -m distill.expert_pipeline \
   --mode cot \
   --dataset ./domain_data/tax \
   --teacher /Users/Shared/llama/models/Meta-Llama-3-70B-Instruct-Q4_K_M.gguf \
@@ -545,7 +547,7 @@ pixi run python scripts/expert_pipeline.py \
   --output_dir ./domain_data/tax_cot
 
 # 4. Distill on CoT data
-pixi run python scripts/expert_pipeline.py \
+pixi run python -m distill.expert_pipeline \
   --mode distill \
   --dataset ./domain_data/tax_cot/hf_dataset \
   --output_dir ./runs/tax-expert \
@@ -604,12 +606,12 @@ All GGUF files go to `/Users/Shared/llama/models/`.
 
 ### Generation Quality Metrics
 
-**Script:** `scripts/eval_quality.py`
+**Module:** `distill.eval_quality` (`python -m distill.eval_quality`)
 
 Generates N completions and measures diversity, quality, and instruction-following.
 
 ```bash
-pixi run python scripts/eval_quality.py ./distilled-mlx \
+pixi run python -m distill.eval_quality ./distilled-mlx \
   --judge \
   --teacher Qwen/Qwen2-1.5B-Instruct \
   --judge-teacher-ppl \
@@ -638,13 +640,13 @@ Results saved to `quality_metrics.json`.
 
 ### Validation Loss
 
-**Script:** `scripts/run_eval.py`
+**Module:** `distill.run_eval` (`python -m distill.run_eval`)
 
 Computes cross-entropy on the validation split. Skipped for MLX backend (handled
 internally by `distill_mlx.py`).
 
 ```bash
-pixi run python scripts/run_eval.py ./distilled-minillm \
+pixi run python -m distill.run_eval ./distilled-minillm \
   --backend auto --compare_teacher --max_val_samples 500
 ```
 
@@ -659,13 +661,13 @@ pixi run python scripts/run_eval.py ./distilled-minillm \
 
 ### WikiText-2 Benchmarks
 
-**Script:** `scripts/run_benchmarks.py`
+**Module:** `distill.run_benchmarks` (`python -m distill.run_benchmarks`)
 
 Evaluates on WikiText-2-raw-v1 (500 sequences by default). A >15% PPL increase over
 a baseline triggers a regression warning.
 
 ```bash
-pixi run python scripts/run_benchmarks.py ./distilled-mlx \
+pixi run python -m distill.run_benchmarks ./distilled-mlx \
   --baseline_dir ./reference-model --n_sequences 500
 ```
 
@@ -687,7 +689,7 @@ clean checkpoint-and-pause — no data is lost.
 
 ### Thermal Agent
 
-**Script:** `scripts/thermal_agent.py`
+**Module:** `distill.thermal_agent` (`python -m distill.thermal_agent`)
 
 Polls `mactop` for CPU/GPU/SoC temperatures and power draw every N seconds. Writes
 `pause.flag` to all watched directories when any metric exceeds the threshold, then
@@ -695,7 +697,7 @@ clears it automatically once temperatures drop by the hysteresis delta.
 
 ```bash
 # One-time session
-pixi run python scripts/thermal_agent.py \
+pixi run python -m distill.thermal_agent \
   --watch ./distilled-mlx ./distilled-minillm \
   --threshold 85 --metric soc_temp_c --interval 30
 
@@ -720,7 +722,7 @@ Provides: `cpu_temp`, `gpu_temp`, `soc_temp`, `cpu_power`, `gpu_power`, `total_p
 
 ### Training Watchdog
 
-**Script:** `scripts/training_watchdog.py`
+**Module:** `distill.training_watchdog` (`python -m distill.training_watchdog`)
 
 Reads `trainer_state.json` every N seconds. Writes `pause.flag` on:
 
@@ -728,7 +730,7 @@ Reads `trainer_state.json` every N seconds. Writes `pause.flag` on:
 - **Divergence:** recent avg loss > early baseline × 1.5
 
 ```bash
-pixi run python scripts/training_watchdog.py ./distilled-mlx \
+pixi run python -m distill.training_watchdog ./distilled-mlx \
   --interval 60 --config scripts/watchdog_rules.json
 ```
 
@@ -761,7 +763,7 @@ Calls `convert_hf_to_gguf.py` from llama.cpp (`/Users/Shared/llama/`). Runs insi
 ### CoreML (Apple Neural Engine)
 
 ```bash
-pixi run python scripts/export_coreml.py \
+pixi run python -m distill.export_coreml \
   --model_dir ./distilled-minillm \
   --quantize int4 \
   --compute_units CPU_AND_NE \
@@ -804,13 +806,13 @@ pixi run mlx_lm.convert \
 
 ### Distillation Launcher
 
-**Script:** `scripts/launch_ui.py`
+**Module:** `distill.launch_ui` (`python -m distill.launch_ui`)
 
 Full-featured parameter form for launching, monitoring, and evaluating distillation
 runs from a browser — no terminal required.
 
 ```bash
-pixi run python scripts/launch_ui.py
+pixi run python -m distill.launch_ui
 # → http://127.0.0.1:7861
 ```
 
@@ -836,15 +838,15 @@ pixi run python scripts/launch_ui.py
 
 ### Universal Model Evaluator
 
-**Script:** `scripts/eval_gradio.py`
+**Module:** `distill.eval_gradio` (`python -m distill.eval_gradio`)
 
 Standalone evaluator with auto-format detection — works with PyTorch, MLX, GGUF,
 and vLLM backends.
 
 ```bash
-pixi run python scripts/eval_gradio.py
-pixi run python scripts/eval_gradio.py --model_path ./distilled-mlx --backend mlx
-pixi run python scripts/eval_gradio.py --model_path /Users/Shared/llama/models/model.gguf
+pixi run python -m distill.eval_gradio
+pixi run python -m distill.eval_gradio --model_path ./distilled-mlx --backend mlx
+pixi run python -m distill.eval_gradio --model_path /Users/Shared/llama/models/model.gguf
 # → http://127.0.0.1:7860
 ```
 
@@ -882,9 +884,9 @@ Rendered with LaTeX / MathJax in both Gradio UIs (Help tab + Algorithms tab).
 Run standalone to open an interactive browser view:
 
 ```bash
-pixi run python scripts/show_algorithms.py
-pixi run python scripts/show_algorithms.py --output algorithms.html  # save only
-pixi run python scripts/show_algorithms.py --latex algorithms.tex    # export LaTeX source
+pixi run python -m distill.show_algorithms
+pixi run python -m distill.show_algorithms --output algorithms.html  # save only
+pixi run python -m distill.show_algorithms --latex algorithms.tex    # export LaTeX source
 ```
 
 **Covered algorithms:**
@@ -906,7 +908,7 @@ All configs live in `configs/`.
 
 ### `configs/golden_pipeline.json`
 
-Full production run config — loaded by `run_golden.sh`. Edit to change dataset,
+Full production run config — loaded by `scripts/run_golden.sh`. Edit to change dataset,
 epochs, LoRA rank, export targets, etc.
 
 ### `configs/mlx_recommended.json`
@@ -956,7 +958,7 @@ Magpie domain registry: per-domain system prompts and filter configs
 
 **Using a config with the agent:**
 ```bash
-pixi run python scripts/run_distillation_agent.py --config configs/golden_pipeline.json
+pixi run python -m distill.run_distillation_agent --config configs/golden_pipeline.json
 # CLI flags supplied alongside --config override the file values
 ```
 
@@ -969,11 +971,11 @@ Train with zero network access after a one-time download.
 **Step 1 — Pre-cache (with internet):**
 ```bash
 # All-in-one
-pixi run python scripts/setup_airgap.py --open
+pixi run python -m distill.setup_airgap --open
 
 # Or separately
-pixi run python scripts/cache_models.py     # → ~/.cache/huggingface/
-pixi run python scripts/cache_datasets.py  # → datasets_cache/
+pixi run python -m distill.cache_models     # → ~/.cache/huggingface/
+pixi run python -m distill.cache_datasets  # → datasets_cache/
 ```
 
 **Step 2 — Set offline env vars:**
@@ -986,7 +988,7 @@ export TRANSFORMERS_OFFLINE=1
 
 **Step 3 — Train offline:**
 ```bash
-pixi run python scripts/run_distillation_agent.py \
+pixi run python -m distill.run_distillation_agent \
   --open --offline --backend mlx --epochs 2
 ```
 
@@ -1110,7 +1112,7 @@ Use `mx.clear_cache()` (MLX ≥ 0.18).
 **`No module named 'trl'` / `gradio`**
 ```bash
 pixi run pip install trl transformers peft datasets gradio
-# Or relaunch: pixi run python scripts/launch_ui.py
+# Or relaunch: pixi run python -m distill.launch_ui
 ```
 
 **Thermal pauses too frequent**
@@ -1121,52 +1123,28 @@ pixi run pip install trl transformers peft datasets gradio
 
 ## Project Structure
 
+Python sources live in the installable **`distill/`** package (`pip install -e .` / Pixi `pypi-dependencies`). Run CLIs with **`python -m distill.<module>`** or the console scripts from `pyproject.toml` (`distill-agent`, `distill-ui`, …). See [docs/INDEX.md](docs/INDEX.md).
+
 ```
-distill/
-├── scripts/
-│   ├── distill_mlx.py             MLX forward KL training
-│   ├── distill_minillm.py         MiniLLM / GRPO training (PyTorch)
-│   ├── distill_sft.py             SFT warmup (Stage 1)
-│   ├── distill_forward.py         Classification KD (BERT etc.)
-│   ├── distill_unsloth.py         Unsloth backend
-│   ├── run_distillation_agent.py  Autonomous orchestrator
+├── distill/                       Python package (training, eval, UIs)
+│   ├── launch_ui/                 Gradio launcher (split subpackage)
 │   ├── data_pipeline.py           Dataset loading & formatting
-│   ├── magpie_synth.py            Magpie self-synthesis
-│   ├── filter_dataset.py          Quality filtering & dedup
-│   ├── generate_synthetic_data.py Self-Instruct synthesis
-│   ├── expert_pipeline.py         Domain CoT distillation
-│   ├── eval_quality.py            Generation quality metrics
-│   ├── run_eval.py                Validation loss
-│   ├── run_benchmarks.py          WikiText-2 benchmarks
-│   ├── thermal_agent.py           Hardware thermal protection
-│   ├── training_watchdog.py       ML plateau / divergence detection
-│   ├── watchdog_callbacks.py      pause.flag training callbacks
-│   ├── export_coreml.py           CoreML export
+│   ├── run_distillation_agent.py  Autonomous orchestrator
+│   └── …                          See repo tree
+├── scripts/                       Shell helpers (.sh), LaunchAgent plist, etc.
+│   ├── install.sh                 Hardware-aware installer
+│   ├── run_golden.sh              One-command production run
+│   ├── start.sh / stop.sh         tmux services
 │   ├── export_student_gguf.sh     GGUF export
-│   ├── eval_gradio.py             Universal model evaluator UI
-│   ├── launch_ui.py               Distillation launcher UI
-│   ├── dashboard.py               Training plots dashboard
-│   ├── show_algorithms.py         LaTeX algorithm reference
-│   ├── universal_model_loader.py  Multi-format model loading
-│   ├── artifact_detector.py       Output directory introspection
-│   ├── mlx_eval_utils.py          MLX inference utilities
-│   ├── cpp_eval_utils.py          llama.cpp inference utilities
-│   ├── cache_models.py            Pre-download models (air-gap)
-│   ├── cache_datasets.py          Pre-download datasets (air-gap)
-│   ├── setup_airgap.py            Air-gap bundle preparation
-│   ├── monitor_cpu_gpu_temp.py    Live thermal display
-│   ├── start.sh                   Start tmux services
-│   ├── stop.sh                    Stop tmux session
-│   ├── install_thermal_agent.sh   Install macOS LaunchAgent
-│   └── setup_shared_models.sh     Multi-user model sharing
+│   └── …
+├── docs/                          Guides (see docs/INDEX.md)
 ├── configs/
 │   ├── golden_pipeline.json       Production run config
 │   ├── mlx_recommended.json       MLX recommended settings
 │   ├── agent_config.json          Default agent config
 │   ├── watchdog_rules.json        Plateau / divergence rules
 │   └── domain_prompts.json        Magpie domain registry
-├── pixi.toml                      Conda environment definition
-├── requirements.txt               Pip dependency list
-├── install.sh                     Hardware-aware installer
-└── run_golden.sh                  One-command production run
+├── pyproject.toml                 setuptools / console entry points
+├── pixi.toml                      Conda + editable local package
+└── requirements.txt               Pip dependency list
 ```

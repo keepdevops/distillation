@@ -9,9 +9,9 @@ Appends {"step": ..., "wikitext2_perplexity": ...} to metrics.jsonl.
 Saves benchmark_results.json to model dir.
 
 Usage:
-    python scripts/run_benchmarks.py ./distilled-minillm
-    python scripts/run_benchmarks.py ./distilled-minillm --baseline_dir ./previous-run
-    python scripts/run_benchmarks.py ./distilled-minillm --n_sequences 100 --offline
+    python -m distill.run_benchmarks ./distilled-minillm
+    python -m distill.run_benchmarks ./distilled-minillm --baseline_dir ./previous-run
+    python -m distill.run_benchmarks ./distilled-minillm --n_sequences 100 --offline
 """
 from __future__ import annotations
 

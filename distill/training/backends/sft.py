@@ -12,8 +12,8 @@ Output: {output_dir}/sft_checkpoint/   (merged LoRA weights, HF format)
         {output_dir}/sft_labels.jsonl  (teacher-generated labels cache)
 
 Usage:
-    python scripts/distill_sft.py --open --output_dir ./distilled-minillm
-    python scripts/distill_sft.py --open --epochs 1 --max_samples 2000 \
+    python -m distill.distill_sft --open --output_dir ./distilled-minillm
+    python -m distill.distill_sft --open --epochs 1 --max_samples 2000 \
         --output_dir ./distilled-minillm --watchdog
 """
 

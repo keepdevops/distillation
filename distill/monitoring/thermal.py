@@ -6,10 +6,10 @@ Continuously monitors CPU/GPU/SoC temperatures and pauses ALL running jobs when
 thermal limits are exceeded. Resumes jobs automatically when temps drop.
 
 Usage:
-    python scripts/thermal_agent.py --watch ./distilled-minillm
-    python scripts/thermal_agent.py --watch ./distilled-minillm ./distilled-mlx ./distilled-sft
-    python scripts/thermal_agent.py --watch . --threshold 70
-    python scripts/thermal_agent.py --daemon --watch . --threshold 85
+    python -m distill.thermal_agent --watch ./distilled-minillm
+    python -m distill.thermal_agent --watch ./distilled-minillm ./distilled-mlx ./distilled-sft
+    python -m distill.thermal_agent --watch . --threshold 70
+    python -m distill.thermal_agent --daemon --watch . --threshold 85
 """
 
 import argparse
@@ -65,10 +65,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python scripts/thermal_agent.py --watch ./distilled-minillm
-  python scripts/thermal_agent.py --watch ./distilled-minillm ./distilled-mlx
-  python scripts/thermal_agent.py --watch . --threshold 70 --interval 15
-  python scripts/thermal_agent.py --daemon --watch . --log thermal_agent.jsonl
+  python -m distill.thermal_agent --watch ./distilled-minillm
+  python -m distill.thermal_agent --watch ./distilled-minillm ./distilled-mlx
+  python -m distill.thermal_agent --watch . --threshold 70 --interval 15
+  python -m distill.thermal_agent --daemon --watch . --log thermal_agent.jsonl
 
 Metrics:
   soc_temp_c     - System-on-Chip temperature (default)

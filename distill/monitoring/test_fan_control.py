@@ -154,9 +154,9 @@ def main():
     print("✓ All checks passed! Fan control should work.")
     print("=" * 70)
     print("\nTo enable fan control during monitoring, run:")
-    print("  python scripts/monitor_cpu_gpu_temp.py --fan-control")
+    print("  python -m distill.monitor_cpu_gpu_temp --fan-control")
     print("\nOr with custom threshold:")
-    print("  python scripts/monitor_cpu_gpu_temp.py --fan-control --fan-threshold 55")
+    print("  python -m distill.monitor_cpu_gpu_temp --fan-control --fan-threshold 55")
     print("\nDefault threshold is now 60°C (fans activate when chip hits 60°C)")
     print("\nNOTE: The app must stay running while monitoring for fan control to work.")
     return 0

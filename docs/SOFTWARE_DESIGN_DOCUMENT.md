@@ -177,7 +177,7 @@ L = α × CE(student, labels) + (1-α) × T² × KL(soft_student || soft_teacher
 - Advantage-weighted policy gradient
 - Mode-seeking: student focuses on teacher’s high-confidence outputs
 
-See `scripts/distill_minillm.py` and `scripts/distill_forward.py`.
+See `python -m distill.distill_minillm` and `python -m distill.distill_forward`.
 
 #### 4.2.2 C++ (Bare-Metal Inference / Simple KD)
 
@@ -201,7 +201,7 @@ COPY environment.yml /tmp/
 RUN micromamba install -y -n base -f /tmp/environment.yml
 WORKDIR /app
 COPY scripts/ /app/scripts/
-CMD ["python", "scripts/distill_minillm.py", "--help"]
+CMD ["python", "-m", "distill.distill_minillm", "--help"]
 ```
 
 **Note:** MPS passthrough on Mac Docker is experimental; bare-metal preferred for M3 perf.
@@ -210,7 +210,7 @@ CMD ["python", "scripts/distill_minillm.py", "--help"]
 
 | Mode | Description |
 |------|-------------|
-| **CLI** | `python scripts/distill_minillm.py --teacher X --student Y --dataset Z` |
+| **CLI** | `python -m distill.distill_minillm --teacher X --student Y --dataset Z` |
 | **Gradio** | Local web UI: model selection, hyperparams, progress, plots |
 | **Logging** | JSON/CSV metrics, matplotlib plots to disk (no WandB online) |
 
@@ -224,8 +224,8 @@ Gradio runs on `127.0.0.1` only (no public share).
 
 1. Install Miniforge (ARM64)
 2. Create env: `conda env create -f environment.yml`
-3. Cache models: `python scripts/cache_models.py`
-4. Cache datasets: `python scripts/cache_datasets.py`
+3. Cache models: `python -m distill.cache_models`
+4. Cache datasets: `python -m distill.cache_datasets`
 5. Package: `conda pack -n distillation_m3 -o distill-offline.tar.gz`
 6. Compute SHA-256 of all artifacts
 7. Transfer via USB/SSD
@@ -237,7 +237,7 @@ Gradio runs on `127.0.0.1` only (no public share).
 3. `source ~/envs/distill-offline/bin/activate && conda-unpack`
 4. `export HF_HOME=/path/to/hf_cache`
 5. `export HF_DATASETS_CACHE=/path/to/ds_cache`
-6. Run `python scripts/run_distillation_agent.py --open --offline --backend mlx --export gguf`
+6. Run `python -m distill.run_distillation_agent --open --offline --backend mlx --export gguf`
 
 ---
 

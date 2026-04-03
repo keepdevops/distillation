@@ -6,8 +6,8 @@ Displays current CPU/GPU temperatures and allows adjusting fan speeds
 via Macs Fan Control CLI.
 
 Usage:
-    python scripts/fan_control_popup.py
-    python scripts/fan_control_popup.py --threshold 75  # Show warning if temp > 75°C
+    python -m distill.fan_control_popup
+    python -m distill.fan_control_popup --threshold 75  # Show warning if temp > 75°C
 """
 
 import argparse

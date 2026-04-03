@@ -4,8 +4,8 @@
 
 ### Files Modified
 
-1. **scripts/eval_quality.py** (Major rewrite)
-2. **scripts/experiment_log.py** (Enhanced diagnostics)
+1. **python -m distill.eval_quality** (Major rewrite)
+2. **python -m distill.experiment_log** (Enhanced diagnostics)
 
 ### New Dependencies
 
@@ -192,7 +192,7 @@ All existing scripts and workflows continue to work:
 
 ```bash
 # Old command still works
-python scripts/eval_quality.py ./distilled-minillm
+python -m distill.eval_quality ./distilled-minillm
 
 # Behavior:
 # - Uses default batch_size=8 (faster automatically)
@@ -204,7 +204,7 @@ python scripts/eval_quality.py ./distilled-minillm
 
 ```bash
 # Enable new features explicitly
-python scripts/eval_quality.py ./distilled-minillm \
+python -m distill.eval_quality ./distilled-minillm \
     --judge \
     --judge-teacher-ppl \
     --backend mlx
@@ -240,15 +240,15 @@ Samples are marked with `"quality_gate_passed": true/false` but still included.
 ### Minimal Test (Syntax Check)
 
 ```bash
-python -m py_compile scripts/eval_quality.py
-python -m py_compile scripts/experiment_log.py
-python scripts/eval_quality.py --help
+python -m py_compile distill/eval_quality.py
+python -m py_compile distill/experiment_log.py
+python -m distill.eval_quality --help
 ```
 
 ### Functional Test (10 samples, no judge)
 
 ```bash
-python scripts/eval_quality.py ./distilled-minillm \
+python -m distill.eval_quality ./distilled-minillm \
     --n_samples 10 \
     --batch_size 4 \
     --offline
@@ -264,7 +264,7 @@ Expected output:
 ### Full Test (50 samples + judge)
 
 ```bash
-python scripts/eval_quality.py ./distilled-minillm \
+python -m distill.eval_quality ./distilled-minillm \
     --n_samples 50 \
     --judge \
     --judge-teacher-ppl \
@@ -277,7 +277,7 @@ Expected time: ~60s (vs 250s old method)
 ### MLX Test (Apple Silicon only)
 
 ```bash
-python scripts/eval_quality.py ./distilled-minillm \
+python -m distill.eval_quality ./distilled-minillm \
     --n_samples 20 \
     --backend mlx \
     --offline
@@ -325,11 +325,11 @@ Add these flags to your `run_distillation_agent.py` calls:
 
 ```bash
 # Before (old)
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
     --open --offline --epochs 2 --export gguf --log_experiment
 
 # After (with all quality gates)
-python scripts/run_distillation_agent.py \
+python -m distill.run_distillation_agent \
     --open --offline --epochs 2 --export gguf --log_experiment \
     --judge --judge-teacher-ppl --backend mlx
 ```

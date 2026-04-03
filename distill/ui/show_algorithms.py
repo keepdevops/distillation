@@ -4,8 +4,8 @@ Renders all distillation algorithms in LaTeX via a self-contained HTML/MathJax p
 Opens automatically in the default browser.
 
 Usage:
-    python scripts/show_algorithms.py
-    python scripts/show_algorithms.py --output algorithms.html   # save only, no open
+    python -m distill.show_algorithms
+    python -m distill.show_algorithms --output algorithms.html   # save only, no open
 """
 
 import argparse

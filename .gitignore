@@ -67,6 +67,12 @@ data/
 magpie_data/
 test-*
 
+# Local state / logs (not source)
+experiment_log.jsonl
+thermal_agent.jsonl
+thermal_agent.stderr.log
+nohup.out
+
 # Distillation outputs
 distilled-*/
 gguf_models/
@@ -107,7 +113,8 @@ llama.cpp/
 tmp/
 temp/
 *.tmp
-test_*.py
+# Scratch test files at repo root only (tests/ is tracked)
+/test_*.py
 *.bak
 
 # Environment files
