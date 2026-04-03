@@ -64,7 +64,7 @@ cmd_production() {
 cmd_golden() {
   cd "$ROOT_DIR"
   mkdir -p runs
-  exec .pixi/envs/default/bin/python \
+  KMP_DUPLICATE_LIB_OK=TRUE exec .pixi/envs/default/bin/python \
     -m distill.run_distillation_agent --config configs/golden_pipeline.json "$@"
 }
 
@@ -176,7 +176,7 @@ cmd_export() {
 # ── dispatch ─────────────────────────────────────────────────────────────────
 case "$CMD" in
   production) cmd_production ;;
-  golden)     cmd_golden "$@" ;;
+  golden)     cmd_golden "${@:2}" ;;
   phase2)     cmd_phase2 "$@" ;;
   smoke)      cmd_smoke ;;
   download)   cmd_download "$@" ;;
