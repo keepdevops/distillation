@@ -160,7 +160,7 @@ cd distill
 ./scripts/install.sh   # auto-detects Apple Silicon / NVIDIA / CPU
 
 # One-command golden production run (~3 hours on M3 Max)
-bash scripts/run_golden.sh
+bash scripts/run.sh golden
 
 # Headless MLX run (recommended for M3 Max, no UI needed)
 pixi run python -m distill.run_distillation_agent \
@@ -426,7 +426,7 @@ writes hyperparameter suggestions for the next run.
 | Highest quality | `--curriculum --backend pytorch --export gguf` |
 | Domain expert | `expert_pipeline.py --mode distill` |
 | Hyperparameter search | `--n_trials 3 --curriculum` |
-| Full production run | `bash scripts/run_golden.sh` |
+| Full production run | `bash scripts/run.sh golden` |
 
 ---
 
@@ -908,7 +908,7 @@ All configs live in `configs/`.
 
 ### `configs/golden_pipeline.json`
 
-Full production run config — loaded by `scripts/run_golden.sh`. Edit to change dataset,
+Full production run config — loaded by `scripts/run.sh golden`. Edit to change dataset,
 epochs, LoRA rank, export targets, etc.
 
 ### `configs/mlx_recommended.json`
@@ -1132,11 +1132,9 @@ Python sources live in the installable **`distill/`** package (`pip install -e .
 │   ├── run_distillation_agent.py  Autonomous orchestrator
 │   └── …                          See repo tree
 ├── scripts/                       Shell helpers (.sh), LaunchAgent plist, etc.
-│   ├── install.sh                 Hardware-aware installer
-│   ├── run_golden.sh              One-command production run
-│   ├── start.sh / stop.sh         tmux services
-│   ├── export_student_gguf.sh     GGUF export
-│   └── …
+│   ├── install.sh                 Hardware-aware installer (Apple Silicon / NVIDIA / CPU)
+│   ├── run.sh                     Distillation runs: golden, production, phase2, smoke, download, export
+│   └── services.sh                Service management: start, stop, monitor
 ├── docs/                          Guides (see docs/INDEX.md)
 ├── configs/
 │   ├── golden_pipeline.json       Production run config

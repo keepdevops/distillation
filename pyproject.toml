@@ -9,6 +9,20 @@ description = "On-device LLM knowledge distillation toolkit"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
+dependencies = [
+  "transformers>=4.38",
+  "datasets>=2.14",
+  "accelerate>=0.24",
+  "peft>=0.9",
+  "evaluate>=0.4",
+  "trl>=0.10",
+  "gradio>=6.0",
+  "matplotlib>=3.7",
+  "seaborn>=0.12",
+  "tqdm>=4.0",
+  "rich>=13.0",
+  "psutil>=5.0",
+]
 
 [project.scripts]
 distill-agent = "distill.orchestration.agent:main"
