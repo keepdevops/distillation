@@ -247,14 +247,14 @@ def main():
     )
 
     callbacks = []
-    from .watchdog_callbacks import MetricsCallback
+    from distill.infra.watchdog_callbacks import MetricsCallback
     callbacks.append(MetricsCallback(args.output_dir))
     if args.watchdog:
-        from .watchdog_callbacks import PauseFlagCallback
+        from distill.infra.watchdog_callbacks import PauseFlagCallback
         callbacks.append(PauseFlagCallback(args.output_dir))
 
     # Early stopping for diverging trials (saves time on bad configs)
-    from .early_stopping_callback import EarlyStoppingCallback
+    from distill.infra.early_stopping_callback import EarlyStoppingCallback
     callbacks.append(EarlyStoppingCallback(
         check_step=20,              # Check after 20 steps (~2-3 min)
         divergence_threshold=1.5,   # Stop if loss > baseline × 1.5

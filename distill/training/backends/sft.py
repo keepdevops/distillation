@@ -205,7 +205,7 @@ def main():
 
     callbacks = []
     if args.watchdog:
-        from .watchdog_callbacks import PauseFlagCallback
+        from distill.infra.watchdog_callbacks import PauseFlagCallback
         callbacks.append(PauseFlagCallback(str(sft_dir)))
 
     trainer = Trainer(

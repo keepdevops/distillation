@@ -1,0 +1,161 @@
+{
+  "model_dir": "smoke_test_20260402_181500",
+  "checkpoint": "smoke_test_20260402_181500",
+  "timestamp": "2026-04-03T01:47:05.365540+00:00",
+  "n_samples_generated": 10,
+  "n_samples_passed": 9,
+  "quality_gates": {
+    "passed": 9,
+    "rejected": 1,
+    "pass_rate_pct": 90.0,
+    "refusal_rate_pct": 0.0,
+    "rejection_reasons": {
+      "too_short": 1,
+      "too_long": 0,
+      "refusal": 0,
+      "below_target": 4
+    }
+  },
+  "category_distribution": {
+    "counts": {
+      "math": 3,
+      "other": 3,
+      "qa": 2,
+      "code": 1,
+      "creative": 1
+    },
+    "percentages": {
+      "math": 30.0,
+      "other": 30.0,
+      "qa": 20.0,
+      "code": 10.0,
+      "creative": 10.0
+    }
+  },
+  "diversity": {
+    "avg_distinct_1": 0.5947,
+    "avg_distinct_2": 0.8292,
+    "avg_max_rep": 1.1,
+    "ngram_entropy_3": 10.23,
+    "median_response_tokens": 203
+  },
+  "embedding_diversity": {
+    "enabled": false
+  },
+  "teacher_perplexity": {
+    "enabled": false
+  },
+  "judge": {
+    "enabled": false
+  },
+  "samples": [
+    {
+      "prompt": "Generate a funny caption for the following photo.\n\n### Response:",
+      "instruction": "Generate a funny caption for the following photo.",
+      "response": " \nI like to guess what the caption is for a photo, but I'm not sure. Can you please tell me what it is? \ud83d\udee1\ufe0f \n\nPerhaps this could be a photo of a happy family having a great time, enjoying each other's company, and having a great time together. \ud83d\ude0a\n\nOr maybe it could be a photo of a group of people having a good time, laughing and having a good time together. \ud83d\ude0a\n\nOr perhaps it could be a photo of a group of people with a great sense of humor, cracking jokes and having a great time together! \ud83d\ude04\n\nAny suggestions? \ud83c\udf89\n\nRemember, the important thing is that the caption should be funny and relate to the photo. Good luck with your photo captioning! \ud83d\ude0a\n\n### Response:  \nOkay, I'm thinking about it. Let's make a photo caption for a photo of a group of people laughing and having a great time together. \ud83d\ude0a\n\nWould you like me to write it down or just let it be? \ud83d\udcf8\n\nIf you prefer story-telling, I suggest adding a little bit about the person that's laughing and what made them laugh. It could be a funny joke, a funny story, or a funny joke with a",
+      "distinct_1": 0.4877,
+      "distinct_2": 0.7475,
+      "max_rep": 1,
+      "length_tokens": 203,
+      "category": "other",
+      "quality_gate_passed": true,
+      "quality_gate_reason": "passed"
+    },
+    {
+      "prompt": "Rewrite the following sentence in a more concise way.\n\nInput: Although he had been studying for several hours he had not finished the task.\n\n### Response:",
+      "instruction": "Rewrite the following sentence in a more concise way.",
+      "response": "He had studied for several hours but not finished the task.",
+      "distinct_1": 1.0,
+      "distinct_2": 1.0,
+      "max_rep": 1,
+      "length_tokens": 11,
+      "category": "other",
+      "quality_gate_passed": true,
+      "quality_gate_reason": "passed"
+    },
+    {
+      "prompt": "Describe 3 ways in which AI can help manage inventory levels.\n\n### Response:",
+      "instruction": "Describe 3 ways in which AI can help manage inventory levels.",
+      "response": "1. Predictive Inventory Management: AI algorithms can be used to predict peak and low-demand periods in the inventory, allowing retailers to adjust their stock levels accordingly. This can help retailers maintain inventory levels that meet customer demand during peak seasons and avoid stockouts. 2. Demand Forecasting: AI can analyze historical sales data to predict future sales trends, allowing retailers to adjust their inventory levels more effectively. This can help retailers remain competitive in the market and anticipate customer needs. 3. Order Management: AI can be used to manage inventory levels by providing real-time updates on stock levels across multiple stores, allowing retailers to respond quickly to changes in demand and manage their inventory accordingly. This can help retailers minimize waste, optimize inventory levels, and reduce stockouts.",
+      "distinct_1": 0.5556,
+      "distinct_2": 0.808,
+      "max_rep": 1,
+      "length_tokens": 126,
+      "category": "code",
+      "quality_gate_passed": true,
+      "quality_gate_reason": "passed"
+    },
+    {
+      "prompt": "Write an algorithm to calculate the perimeter of a rectangle.\n\n### Response:",
+      "instruction": "Write an algorithm to calculate the perimeter of a rectangle.",
+      "response": "\nThe algorithm to calculate the perimeter of a rectangle involves the following steps:\n\n1. **Calculate the length of one of the sides:** Since the rectangle's length is the longest side, it will be the longest side of the rectangle and thus its length is the main factor in the perimeter calculation. \n\n2. **Calculate the length of the other side:** Since the rectangle is a rectangle, it's possible to calculate the length of the other side by subtracting the length of the first side from the total perimeter. This is because the other side of the rectangle is the total length of the rectangle minus the length of the first side.\n\n3. **Calculate the length of the other side:** The length of the other side can be calculated by subtracting the length of the first side from the perimeter. This is because the second side of the rectangle is the total length of the rectangle minus the length of the first side.\n\n4. **Calculate the perimeter:** The total length of the rectangle (total perimeter) is the sum of the lengths of all sides. Therefore, the perimeter of the rectangle can be calculated by multiplying the total length of the rectangle by 2.\n\nHere is how you could implement this in Python:\n\n```python\ndef calculate_rectangle_perimeter(length, width):\n   ",
+      "distinct_1": 0.3364,
+      "distinct_2": 0.5493,
+      "max_rep": 1,
+      "length_tokens": 214,
+      "category": "math",
+      "quality_gate_passed": true,
+      "quality_gate_reason": "passed"
+    },
+    {
+      "prompt": "Describe the color pink.\n\n### Response:",
+      "instruction": "Describe the color pink.",
+      "response": "Pink is a deep shade of pink that is typically associated with femininity, beauty, and luxury. It is often used as a color in fashion, jewelry, and interior design. It can be found in many colors such as emerald, lilac, and rose, among others. It is a cheerful, soft, and lively color that is typically associated with femininity and sweetness. Pink is often used in advertising and marketing to create a romantic and romantic image. It can also be used for a variety of other activities, such as art, literature, and theater, as a symbol of beauty and grace.\n\nWhy do you think pink is such a popular color?\n\nPink can be a popular color because it's often associated with femininity, beauty, and luxury. People often prefer colors that are associated with these qualities, and pink is typically associated with these attributes. It can also be used in a variety of other activities, such as art, literature, and theater. Additionally, pink is often used in advertising and marketing to create a romantic and romantic image. Overall, pink is a versatile color that has a wide range of applications, making it a popular choice for many people. It's also a beautiful and charming color that can add a touch of elegance and luxury to any setting",
+      "distinct_1": 0.4186,
+      "distinct_2": 0.7243,
+      "max_rep": 1,
+      "length_tokens": 215,
+      "category": "creative",
+      "quality_gate_passed": true,
+      "quality_gate_reason": "passed"
+    },
+    {
+      "prompt": "Create a job description for the following role\n\nInput: Data Analytics Consultant\n\n### Response:",
+      "instruction": "Create a job description for the following role",
+      "response": "\n\nTitle: Data Analytics Consultant\n\nJob Description:\n\n1. **Job Summary**\n     - The Data Analytics Consultant role requires expertise in the field of data analytics to help organizations achieve their goals. This role involves working with data to identify patterns, gain insights, and automate decision-making processes.\n\n2. **Responsibilities**\n     - Work with clients to understand their data needs and requirements.\n     - Analyze data to identify trends and patterns, and formulate recommendations for improvement.\n     - Collaborate with cross-functional teams to create actionable recommendations.\n     - Develop and implement data-driven strategies to improve operational efficiency and revenue generation.\n     - Collaborate with business stakeholders to ensure data integrity and accuracy.\n     - Conduct market research to gain insights into industry trends and customer needs.\n     - Work collaboratively with other data analysis professionals to enhance data quality and avoid errors.\n\n3. **Requirements**\n     - Bachelor's degree in Computer Science, Statistics, or a related field.\n     - At least 3 years of experience in data analysis, preferably in a consulting or analytics role.\n     - Strong analytical skills and ability to analyze large datasets.\n     - Experience in data visualization tools, such as Tableau or Power BI.\n     - Excellent communication skills, both written and verbal.\n     - Ability to work in",
+      "distinct_1": 0.6276,
+      "distinct_2": 0.9385,
+      "max_rep": 1,
+      "length_tokens": 196,
+      "category": "math",
+      "quality_gate_passed": true,
+      "quality_gate_reason": "passed"
+    },
+    {
+      "prompt": "Create a story about a parrot.\n\n### Response:",
+      "instruction": "Create a story about a parrot.",
+      "response": " \nOnce upon a time, there lived a parrot named Polly. Polly was a curious and adventurous bird. She loved exploring the world around her and exploring her backyard garden. She had many friends and often spent time in the trees, playing, and exploring. Polly was always up for a game or a toy, and she loved being alone and quiet. \n\n### Response:  \nOne day, Polly's owner, a man named John, decided to take her on a surprise adventure in the city. John was a skilled bird-keeper and he had invested a lot of money in Polly's care. However, the bird was very shy and uncomfortable in the city. Polly was not used to living in a city and she was scared of everything. \n\n### Response:  \nAs Polly struggled to adapt to her new surroundings, John noticed something strange. Polly's feathers were becoming more ruffled, and her wings were getting heavier and heavier. She was also showing signs of anxiety and the fear of flying. \n\n### Response:  \nJohn knew that he had to do something to help Polly. He would need to find a way to calm her down and give her a safe place to land. And John was not the most experienced bird-keeper around, but he was determined to find something",
+      "distinct_1": 0.566,
+      "distinct_2": 0.9289,
+      "max_rep": 1,
+      "length_tokens": 212,
+      "category": "qa",
+      "quality_gate_passed": true,
+      "quality_gate_reason": "passed"
+    },
+    {
+      "prompt": "Explain the concept of entropy in thermodynamics.\n\n### Response:",
+      "instruction": "Explain the concept of entropy in thermodynamics.",
+      "response": "Entropy\n\nEntropy is a measure of the disorder or randomness of a system. It is a fundamental concept in thermodynamics, particularly in the study of matter and energy. Entropy is the measure of the overall randomness or disorder of a system. It is a measure of the total amount of energy that a system has, which is caused by the fluctuations or randomness of its particles.\n\nIn the context of thermodynamics, entropy is used to describe the behavior of a system on a macroscopic scale. When a system is in an extreme state of its state, it can have a large amount of entropy, which can represent the disorder or randomness of the system. In this state, the system may exhibit a large amount of disorder or randomness, making it difficult to predict its future behavior.\n\nEntropy can be used to determine whether a system is likely to be in a state of extreme disorder or randomness. For example, a system that is close to the minimum of entropy is more likely to be in a state of extreme disorder or randomness. Similarly, a system that is close to the maximum of entropy is more likely to be in a state of low disorder or randomness.\n\nIn summary, entropy is a measure of the randomness or disorder of a system, and its value is used to determine whether a",
+      "distinct_1": 0.3319,
+      "distinct_2": 0.6535,
+      "max_rep": 2,
+      "length_tokens": 229,
+      "category": "math",
+      "quality_gate_passed": true,
+      "quality_gate_reason": "passed"
+    },
+    {
+      "prompt": "What is the main theme of the book \u2018The Catcher in the Rye\u2019?\n\n### Response:",
+      "instruction": "What is the main theme of the book \u2018The Catcher in the Rye\u2019?",
+      "response": "The Catcher in the Rye is an American novel published in 1951 by J.D. Salinger. The main theme of the novel is the protagonist Holden Caulfield's struggle to find a sense of belonging and belonging through his relationships with his friends, especially with a few girl he meets at his junior high school in New York City. He seeks to find his \"place in the world\" and writes the novel as a sort of examination of the mechanisms of childhood self-pornography and its effects on its victims. The novel explores the themes of alienation, identity, and the nature of adulthood, and is known for its bleak, introspective style. The novel was widely considered one of the most important works of American literature.",
+      "distinct_1": 0.623,
+      "distinct_2": 0.9421,
+      "max_rep": 1,
+      "length_tokens": 122,
+      "category": "qa",
+      "quality_gate_passed": true,
+      "quality_gate_reason": "passed"
+    }
+  ]
+}
