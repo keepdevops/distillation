@@ -2,7 +2,8 @@
 """
 llama.cpp C++ backend for fast inference/eval on Apple Silicon (M3 Max).
 
-Uses pre-compiled Metal-accelerated binaries from /Users/Shared/llama/:
+Uses pre-compiled Metal-accelerated binaries from the directory resolved by
+cfg.paths.llama_cpp_root (set LLAMA_CPP_ROOT env var to override):
   - llama-perplexity : chunked corpus PPL — 3-5x faster than MLX Python
   - llama-server     : HTTP completion API with parallel slots
                        fire n_parallel concurrent requests → GPU saturated
@@ -22,30 +23,45 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from distill.infra.config import cfg
+
 logger = logging.getLogger(__name__)
 
-LLAMA_ROOT = Path("/Users/Shared/llama")
 DEFAULT_N_GPU_LAYERS = 99    # offload all layers to Metal GPU
-DEFAULT_PORT = 8089           # avoid clash with default llama-server port 8080
 DEFAULT_N_PARALLEL = 4        # concurrent completion slots in llama-server
 
-# Candidate locations searched in order for each binary
-_LLAMA_BIN_CANDIDATES = [
-    LLAMA_ROOT,                                        # flat: /Users/Shared/llama/llama-server
-    LLAMA_ROOT / "llama.cpp" / "build" / "bin",       # cmake build
-    LLAMA_ROOT / "llama.cpp-master" / "build" / "bin",
-    LLAMA_ROOT / "build" / "bin",
-]
+
+def _llama_bin_candidates() -> list[Path]:
+    """Return ordered candidate directories to search for llama.cpp binaries.
+
+    Raises FileNotFoundError if cfg.paths.llama_cpp_root is None (i.e. no
+    llama.cpp installation was found).  Set the LLAMA_CPP_ROOT environment
+    variable to point at your llama.cpp installation directory.
+    """
+    root = cfg.paths.llama_cpp_root
+    if root is None:
+        raise FileNotFoundError(
+            "llama.cpp root directory not found. "
+            "Set the LLAMA_CPP_ROOT environment variable to the directory "
+            "containing your llama.cpp binaries (e.g. /Users/Shared/llama)."
+        )
+    return [
+        root,                                        # flat: <root>/llama-server
+        root / "llama.cpp" / "build" / "bin",        # cmake build
+        root / "llama.cpp-master" / "build" / "bin",
+        root / "build" / "bin",
+    ]
 
 
 # ── Binary helpers ─────────────────────────────────────────────────────────────
 
 def get_binary(name: str) -> str:
-    for d in _LLAMA_BIN_CANDIDATES:
+    candidates = _llama_bin_candidates()
+    for d in candidates:
         p = d / name
         if p.exists():
             return str(p)
-    searched = ", ".join(str(d / name) for d in _LLAMA_BIN_CANDIDATES)
+    searched = ", ".join(str(d / name) for d in candidates)
     raise FileNotFoundError(f"llama.cpp binary '{name}' not found. Searched: {searched}")
 
 
@@ -92,14 +108,14 @@ class LlamaServer:
     def __init__(
         self,
         gguf_path: str,
-        port: int = DEFAULT_PORT,
+        port: int | None = None,
         n_gpu_layers: int = DEFAULT_N_GPU_LAYERS,
         ctx_size: int = 4096,
         n_parallel: int = DEFAULT_N_PARALLEL,
         threads: int = 4,
     ):
         self.gguf_path = gguf_path
-        self.port = port
+        self.port = port if port is not None else cfg.services.llama_server_port
         self.n_gpu_layers = n_gpu_layers
         self.ctx_size = ctx_size
         self.n_parallel = n_parallel
@@ -151,8 +167,8 @@ class LlamaServer:
                     try:
                         lines = log_path.read_text().splitlines()
                         tail = "\n".join(lines[-20:])
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.error("Failed to read llama-server log %s: %s", log_path, exc)
                 raise RuntimeError(
                     f"llama-server exited prematurely (rc={self._proc.returncode})\n"
                     f"Last log lines:\n{tail}"
@@ -161,7 +177,8 @@ class LlamaServer:
                 with urllib.request.urlopen(url, timeout=2):
                     logger.info("  llama-server ready on port %d", self.port)
                     return
-            except Exception:
+            except Exception as exc:
+                logger.debug("llama-server health check failed (will retry): %s", exc)
                 time.sleep(0.5)
         self._stop()
         raise TimeoutError(f"llama-server not ready after {timeout}s")

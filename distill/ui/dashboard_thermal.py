@@ -9,6 +9,7 @@ from pathlib import Path
 
 import gradio as gr
 
+from distill.infra.config import cfg
 from .dashboard_thermal_log import load_thermal
 
 logger = logging.getLogger(__name__)
@@ -53,10 +54,11 @@ def _fmt_w(v):
 # ── Live mactop reading ────────────────────────────────────────────────────
 
 def read_mactop():
+    _mactop_bin = cfg.paths.mactop_bin
+    _pause_threshold = cfg.thermal.threshold_celsius
     try:
         result = subprocess.run(
-            ["/opt/homebrew/bin/mactop",
-             "--headless", "--format", "json", "--count", "1"],
+            [_mactop_bin, "--headless", "--format", "json", "--count", "1"],
             capture_output=True, text=True, timeout=10,
         )
         m = _parse_mactop(result.stdout)
@@ -74,13 +76,14 @@ def read_mactop():
         ]
         for label, val in [("CPU", cpu_t), ("GPU", gpu_t)]:
             try:
-                if float(val) >= 90:
-                    lines.append(f"⚠ {label} ≥ 90°C — watchdog pause threshold")
+                if float(val) >= _pause_threshold:
+                    lines.append(f"⚠ {label} >= {_pause_threshold:.0f}°C — watchdog pause threshold")
             except (TypeError, ValueError):
-                pass  # non-numeric temp value — threshold check not applicable
+                logger.error("read_mactop: non-numeric temp value for %s: %r", label, val)
         return "\n".join(lines)
     except FileNotFoundError:
-        return "mactop not found at /opt/homebrew/bin/mactop"
+        logger.error("read_mactop: mactop not found at %r", _mactop_bin)
+        return f"mactop not found at {_mactop_bin!r}"
     except Exception as exc:
         logger.error("read_mactop error: %s", exc)
         return f"Error: {exc}"

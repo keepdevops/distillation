@@ -7,12 +7,16 @@ Runs locally on 127.0.0.1 only (no public share).
 """
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
 
 from ..backends.universal_loader import UniversalModelLoader, detect_model_format, ModelFormat
 from ..infra.artifact_detector import detect_artifacts, format_artifact_summary
+from ..infra.config import cfg
+
+logger = logging.getLogger(__name__)
 from .gradio_ui_css import CUSTOM_CSS
 from .gradio_ui_tabs import (
     build_model_info_tab,
@@ -37,7 +41,7 @@ def parse_args():
     p.add_argument("--backend", type=str, default=None,
                    choices=["pytorch", "mlx", "gguf", "vllm"],
                    help="Force specific backend (auto-detects if not specified)")
-    p.add_argument("--port", type=int, default=7860)
+    p.add_argument("--port", type=int, default=cfg.services.gradio_port)
     return p.parse_args()
 
 

@@ -27,7 +27,7 @@ cmd_start() {
 
   command -v tmux &>/dev/null || { echo "Error: tmux not found (brew install tmux)"; exit 1; }
 
-  SESSION="distill"
+  SESSION="${DISTILL_TMUX_SESSION:-distill}"
   echo "==> Cleaning up existing session and processes..."
   tmux kill-session -t "$SESSION" 2>/dev/null || true
   pkill -f "[m]onitor_cpu_gpu_temp" 2>/dev/null || true
@@ -120,8 +120,9 @@ cmd_stop() {
     rm -f "$PID_FILE"
   fi
 
-  # tmux sessions
-  for sess in distill distill-phase2 distill-export distill-download distill-thermal distill-prod; do
+  # tmux sessions — derived from DISTILL_TMUX_SESSION prefix so they match whatever was started
+  _PFX="${DISTILL_TMUX_SESSION:-distill}"
+  for sess in "$_PFX" "${_PFX}-phase2" "${_PFX}-export" "${_PFX}-download" "${_PFX}-thermal" "${_PFX}-prod"; do
     tmux has-session -t "$sess" 2>/dev/null \
       && tmux kill-session -t "$sess" && echo "    [killed] tmux: $sess" || true
   done
@@ -132,7 +133,7 @@ cmd_stop() {
 # ── monitor ──────────────────────────────────────────────────────────────────
 cmd_monitor() {
   shift  # remove 'monitor'
-  SESSION="distill-thermal"
+  SESSION="${DISTILL_TMUX_SESSION:-distill}-thermal"
   INTERVAL="${1:-3}"
   LOGFILE="${2:-}"
 

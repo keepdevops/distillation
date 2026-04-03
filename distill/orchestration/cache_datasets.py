@@ -8,11 +8,13 @@ import argparse
 import logging
 import os
 
+from ..infra.config import cfg
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_DATASETS = [
+_FALLBACK_DATASETS = [
     ("tatsu-lab/alpaca", None),
     ("glue", "sst2"),
     ("teknium/OpenHermes-2.5", None),
@@ -21,6 +23,22 @@ DEFAULT_DATASETS = [
     ("mlabonne/guanaco-llama2-1k", None),
     ("bigcode/self-oss-instruct-sc2-exec-filter-50k", None),
 ]
+
+
+def _normalize_datasets(raw: list) -> list[tuple[str, str | None]]:
+    """Convert cfg.models.cache_datasets entries to (name, config) tuples."""
+    result = []
+    for item in raw:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            result.append((item[0], item[1]))
+        elif isinstance(item, str):
+            result.append((item, None))
+        else:
+            logger.error("Skipping unrecognized dataset entry in config: %r", item)
+    return result
+
+
+DEFAULT_DATASETS = _normalize_datasets(cfg.models.cache_datasets) if cfg.models.cache_datasets else _FALLBACK_DATASETS
 
 
 def main():
@@ -66,7 +84,7 @@ def main():
                 ds.save_to_disk(disk_path)
                 logger.info("  Saved to disk: %s (use --dataset %s)", disk_path, disk_path)
         except Exception as e:
-            logger.warning("  Failed %s: %s", label, e)
+            logger.error("  Failed %s: %s", label, e)
 
     logger.info("Datasets cached to %s", args.output)
 

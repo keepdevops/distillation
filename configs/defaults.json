@@ -1,0 +1,37 @@
+{
+  "_comment": "Default values for all distill subsystems. Override per-machine in configs/overrides.json (git-ignored).",
+  "services": {
+    "gradio_port": 7860,
+    "llama_server_port": 8089,
+    "llama_teacher_port": 8090,
+    "tmux_session": "distill"
+  },
+  "training": {
+    "batch_size": 8,
+    "batch_size_mlx": 2,
+    "learning_rate": 0.0002,
+    "epochs": 2,
+    "max_samples": 2000,
+    "grad_accumulation": 4,
+    "kd_temperature": 1.0,
+    "topk_logits": 50,
+    "lora_r": 8,
+    "lora_alpha": 16,
+    "warmup_ratio": 0.03,
+    "weight_decay": 0.01,
+    "context_size": 4096
+  },
+  "eval": {
+    "n_samples": 100,
+    "batch_size": 8,
+    "temperature": 0.7,
+    "max_length": 512,
+    "n_sequences": 500
+  },
+  "filter": {
+    "target_samples": 10000,
+    "min_response_words": 30,
+    "min_distinct2": 0.40,
+    "max_jaccard": 0.55
+  }
+}

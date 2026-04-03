@@ -6,9 +6,12 @@ Supports PyTorch, MLX, GGUF, and vLLM backends.
 """
 
 import argparse
+import logging
 
 import gradio as gr
 import matplotlib
+
+logger = logging.getLogger(__name__)
 matplotlib.use("Agg")
 
 from ..backends.universal_loader import UniversalModelLoader, detect_model_format
@@ -27,12 +30,13 @@ from .dashboard_discovery import find_run_dirs, find_pipeline_dirs
 from .dashboard_thermal import build_thermal_tab
 from .dashboard_quality import build_quality_tab, load_quality
 from .dashboard_experiments import build_experiments_tab
+from ..infra.config import cfg
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Distillation dashboard")
     p.add_argument("--runs_dir", type=str, default=".", help="Parent dir of training outputs")
-    p.add_argument("--port", type=int, default=7860)
+    p.add_argument("--port", type=int, default=cfg.services.gradio_port)
     return p.parse_args()
 
 

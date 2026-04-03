@@ -18,6 +18,7 @@ import torch
 from peft import LoraConfig, get_peft_model
 
 from ...data.pipeline import load_dataset_split, format_prompt_only, validate_dataset_schema, DATASET_HELP
+from ...infra.config import cfg
 from ...infra.train_utils import get_device
 from transformers import (
     AutoModelForCausalLM,
@@ -40,10 +41,6 @@ os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
 
 LOG = logging.getLogger(__name__)
 
-# Open models (no HuggingFace login / Meta license)
-OPEN_TEACHER = "Qwen/Qwen2-1.5B-Instruct"
-OPEN_STUDENT = "Qwen/Qwen2-0.5B-Instruct"
-
 from .minillm_utils import (  # noqa: F401 — re-exported for callers
     response_quality_reward, detect_attn_impl, _MAX_NATURAL_CHARS,
 )
@@ -51,23 +48,23 @@ from .minillm_utils import (  # noqa: F401 — re-exported for callers
 
 def parse_args():
     p = argparse.ArgumentParser(description="MiniLLM distillation on M3")
-    p.add_argument("--teacher", type=str, default="meta-llama/Llama-3.2-8B-Instruct")
-    p.add_argument("--student", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
+    p.add_argument("--teacher", type=str, default=cfg.models.default_teacher)
+    p.add_argument("--student", type=str, default=cfg.models.default_student)
     p.add_argument("--open", action="store_true",
                    help="Use open models (Qwen2 1.5B→0.5B) — no HF login or Meta license")
-    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca", help=DATASET_HELP)
+    p.add_argument("--dataset", type=str, default=cfg.models.default_dataset, help=DATASET_HELP)
     p.add_argument("--output_dir", type=str, default="./distilled-minillm")
     p.add_argument("--epochs", type=int, default=2)
-    p.add_argument("--batch_size", type=int, default=8, help="Physical batch size (default: 8, optimized for M3 Max)")
+    p.add_argument("--batch_size", type=int, default=cfg.training.batch_size, help="Physical batch size (default: 8, optimized for M3 Max)")
     p.add_argument("--grad_acc", type=int, default=8, help="Gradient accumulation steps (default: 8, effective batch = 64)")
-    p.add_argument("--lora_r", type=int, default=64)
+    p.add_argument("--lora_r", type=int, default=cfg.training.lora_r)
     p.add_argument("--use_4bit_teacher", action="store_true")
-    p.add_argument("--minillm_temp", type=float, default=1.0, help="KD temperature")
+    p.add_argument("--minillm_temp", type=float, default=cfg.training.kd_temperature, help="KD temperature")
     p.add_argument("--max_samples", type=int, default=2000, help="Max train samples (for quick runs)")
     p.add_argument("--eval_steps", type=int, default=20, help="Run eval every N steps (default: 20; lower gives more detail, higher is faster)")
     p.add_argument("--num_generations", type=int, default=4, help="Generations per prompt for GRPO/MiniLLM (default: 4; more gives better advantage variance at cost of speed)")
     p.add_argument("--max_new_tokens", type=int, default=256, help="Max tokens to generate (default: 256; update _MAX_NATURAL_CHARS if changed significantly)")
-    p.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate (default: 2e-5)")
+    p.add_argument("--learning_rate", type=float, default=cfg.training.learning_rate, help="Learning rate (default: 2e-4)")
     p.add_argument("--eval_split", type=float, default=0.02, help="Eval dataset size as fraction of train (default: 0.02 = 2%%)")
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true",
@@ -82,8 +79,8 @@ def parse_args():
 def main():
     args = parse_args()
     if args.open:
-        args.teacher = OPEN_TEACHER
-        args.student = OPEN_STUDENT
+        args.teacher = cfg.models.open_teacher
+        args.student = cfg.models.open_student
         print("Using open models (no login):", args.teacher)
     import random as _random
     _random.seed(args.seed)

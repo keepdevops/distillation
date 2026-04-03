@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import signal
 import socket
@@ -9,6 +10,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Auto-relaunch through pixi if gradio is not importable
 try:
@@ -25,6 +28,7 @@ except ModuleNotFoundError:
 import gradio as gr
 
 from .ui import build_ui
+from ..infra.config import cfg
 
 def _free_port(port: int) -> None:
     """Kill any process listening on the given port."""
@@ -51,7 +55,7 @@ def _free_port(port: int) -> None:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--port", type=int, default=7860)
+    p.add_argument("--port", type=int, default=cfg.services.gradio_port)
     p.add_argument("--host", type=str, default="127.0.0.1")
     args = p.parse_args()
     _free_port(args.port)

@@ -31,7 +31,7 @@ _tmux_wrap() {
 # ── production ───────────────────────────────────────────────────────────────
 cmd_production() {
   cd "$ROOT_DIR"
-  SESSION="distill-prod"
+  SESSION="${DISTILL_TMUX_PREFIX:-distill}-prod"
   if [ -z "${TMUX:-}" ]; then
     if command -v tmux &>/dev/null; then
       if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -40,7 +40,7 @@ cmd_production() {
         exit 1
       fi
       echo "Launching in tmux '$SESSION'... (detach: Ctrl-B D)"
-      exec tmux new-session -s "$SESSION" "$0" production
+      exec tmux new-session -s "$SESSION" "$0" production  # re-entry has DISTILL_TMUX_PREFIX inherited
     fi
   fi
 
@@ -71,7 +71,7 @@ cmd_golden() {
 # ── phase2 ───────────────────────────────────────────────────────────────────
 cmd_phase2() {
   local RUN="${2:-all}"
-  _tmux_wrap "distill-phase2" phase2 "$RUN"
+  _tmux_wrap "${DISTILL_TMUX_PREFIX:-distill}-phase2" phase2 "$RUN"
   cd "$ROOT_DIR"
 
   log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [phase2] $*"; }
@@ -122,7 +122,7 @@ cmd_smoke() {
 
 # ── download ─────────────────────────────────────────────────────────────────
 cmd_download() {
-  _tmux_wrap "distill-download" download "${2:-}"
+  _tmux_wrap "${DISTILL_TMUX_PREFIX:-distill}-download" download "${2:-}"
   OUTPUT_DIR="${2:-./gguf_models}"
   mkdir -p "$OUTPUT_DIR"
   BASE="https://huggingface.co"
@@ -148,15 +148,16 @@ cmd_download() {
 
 # ── export ───────────────────────────────────────────────────────────────────
 cmd_export() {
-  _tmux_wrap "distill-export" export "${2:-}" "${3:-}"
+  _tmux_wrap "${DISTILL_TMUX_PREFIX:-distill}-export" export "${2:-}" "${3:-}"
   STUDENT_DIR="${2:-./distilled-minillm}"
   LLAMA_CPP="${3:-}"
   OUTTYPE="${OUTTYPE:-f16}"
 
   if [[ -z "$LLAMA_CPP" ]]; then
-    if   [[ -d "/Users/Shared/llama" ]]; then LLAMA_CPP="/Users/Shared/llama"
-    elif [[ -d "./llama.cpp" ]];         then LLAMA_CPP="./llama.cpp"
-    else                                      LLAMA_CPP="../llama.cpp"; fi
+    if   [[ -n "${LLAMA_CPP_ROOT:-}" && -d "$LLAMA_CPP_ROOT" ]]; then LLAMA_CPP="$LLAMA_CPP_ROOT"
+    elif [[ -d "/Users/Shared/llama" ]];  then LLAMA_CPP="/Users/Shared/llama"
+    elif [[ -d "./llama.cpp" ]];          then LLAMA_CPP="./llama.cpp"
+    else                                       LLAMA_CPP="../llama.cpp"; fi
   fi
 
   [[ -d "$STUDENT_DIR" ]] || { echo "Error: student dir not found: $STUDENT_DIR"; exit 1; }
@@ -164,11 +165,12 @@ cmd_export() {
   [[ -f "$CONVERT" ]] || { echo "Error: convert_hf_to_gguf.py not found at $CONVERT"; exit 1; }
 
   STUDENT_ABS=$(cd "$STUDENT_DIR" && pwd)
-  OUT_FILE="/Users/Shared/llama/models/$(basename "$STUDENT_ABS")-${OUTTYPE}.gguf"
+  _LLAMA_MODELS_ROOT="${LLAMA_CPP_ROOT:-/Users/Shared/llama}"
+  OUT_FILE="$_LLAMA_MODELS_ROOT/models/$(basename "$STUDENT_ABS")-${OUTTYPE}.gguf"
   mkdir -p "$(dirname "$OUT_FILE")"
   echo "Converting $STUDENT_ABS -> $OUT_FILE"
   python "$CONVERT" "$STUDENT_ABS" --outfile "$OUT_FILE" --outtype "$OUTTYPE"
-  echo "Done. Run: /Users/Shared/llama/llama-server -m $OUT_FILE"
+  echo "Done. Run: $_LLAMA_MODELS_ROOT/llama-server -m $OUT_FILE"
 }
 
 # ── dispatch ─────────────────────────────────────────────────────────────────

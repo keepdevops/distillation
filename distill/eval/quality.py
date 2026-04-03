@@ -27,6 +27,7 @@ import torch
 from ..data.pipeline import load_dataset_split, format_prompt_only
 from ..infra.train_utils import get_device
 from ..backends.cpp_utils import find_gguf
+from ..infra.config import cfg
 
 from .quality_backend import select_backend, load_student_backend
 from .quality_pipeline import run_generation_phase, run_quality_gate_phase, run_embedding_phase
@@ -35,9 +36,6 @@ from .quality_teacher_eval import run_teacher_eval
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-OPEN_STUDENT = "Qwen/Qwen2-0.5B-Instruct"
-OPEN_TEACHER = "Qwen/Qwen2-1.5B-Instruct"
-
 
 def parse_args():
     from ..infra.cli_common import add_cache_and_offline
@@ -45,17 +43,17 @@ def parse_args():
     p.add_argument("output_dir", type=str, help="Training output dir")
     p.add_argument("--checkpoint", type=str, default=None,
                    help="Model checkpoint dir (default: output_dir)")
-    p.add_argument("--student", type=str, default=OPEN_STUDENT)
-    p.add_argument("--teacher", type=str, default=OPEN_TEACHER,
+    p.add_argument("--student", type=str, default=cfg.models.open_student)
+    p.add_argument("--teacher", type=str, default=cfg.models.open_teacher,
                    help="Teacher model for LLM-as-judge and perplexity scoring")
-    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca")
+    p.add_argument("--dataset", type=str, default=cfg.models.default_dataset)
     p.add_argument("--max_samples", type=int, default=2000)
     p.add_argument("--val_size", type=float, default=0.02)
-    p.add_argument("--n_samples", type=int, default=100,
+    p.add_argument("--n_samples", type=int, default=cfg.eval.n_samples,
                    help="Number of samples to generate responses for (default: 100)")
     p.add_argument("--max_new_tokens", type=int, default=256)
-    p.add_argument("--temperature", type=float, default=0.7)
-    p.add_argument("--batch_size", type=int, default=8)
+    p.add_argument("--temperature", type=float, default=cfg.eval.temperature)
+    p.add_argument("--batch_size", type=int, default=cfg.eval.batch_size)
     p.add_argument("--backend", type=str, default="auto",
                    choices=["auto", "pytorch", "mlx", "gguf"])
     p.add_argument("--judge", action="store_true",

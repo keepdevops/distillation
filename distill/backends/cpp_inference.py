@@ -12,8 +12,11 @@ from pathlib import Path
 from typing import Optional
 
 from .cpp_utils import (
-    get_binary, DEFAULT_N_GPU_LAYERS, DEFAULT_PORT, DEFAULT_N_PARALLEL, LlamaServer,
+    get_binary, DEFAULT_N_GPU_LAYERS, DEFAULT_N_PARALLEL, LlamaServer,
 )
+from ..infra.config import cfg
+
+DEFAULT_PORT = cfg.services.llama_server_port
 
 logger = logging.getLogger(__name__)
 

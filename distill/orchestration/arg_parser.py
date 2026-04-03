@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import logging
 
+from ..infra.config import cfg
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     """Return a fully configured ArgumentParser for the distillation agent."""
@@ -44,20 +46,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--coreml_quantize", type=str, default=None,
                     choices=["int4", "int8", "float16"],
                     help="CoreML post-training quantization type")
-    ap.add_argument("--dataset", type=str, default="tatsu-lab/alpaca",
+    ap.add_argument("--dataset", type=str, default=cfg.models.default_dataset,
                     help="HF dataset ID or local path (default: tatsu-lab/alpaca). "
                          "Better options: HuggingFaceH4/no_robots, teknium/OpenHermes-2.5, "
                          "allenai/tulu-3-sft-mixture, Open-Orca/OpenOrca")
     # ── Dataset filtering ─────────────────────────────────────────────────────
     ap.add_argument("--filter", action="store_true",
                     help="Pre-filter dataset with filter_dataset.py before distillation")
-    ap.add_argument("--filter_target", type=int, default=10000,
+    ap.add_argument("--filter_target", type=int, default=cfg.filter.target_samples,
                     help="Keep top-N samples after filtering (default: 10000)")
-    ap.add_argument("--filter_min_response_words", type=int, default=30,
+    ap.add_argument("--filter_min_response_words", type=int, default=cfg.filter.min_response_words,
                     help="Min response word count for filter (default: 30)")
-    ap.add_argument("--filter_min_distinct2", type=float, default=0.40,
+    ap.add_argument("--filter_min_distinct2", type=float, default=cfg.filter.min_distinct2,
                     help="Min distinct-2 score for filter (default: 0.40)")
-    ap.add_argument("--filter_jaccard", type=float, default=0.55,
+    ap.add_argument("--filter_jaccard", type=float, default=cfg.filter.max_jaccard,
                     help="Jaccard similarity threshold for near-dedup (default: 0.55)")
     ap.add_argument("--filter_minhash", action="store_true",
                     help="Use MinHash LSH for global dedup in filter (requires datasketch)")

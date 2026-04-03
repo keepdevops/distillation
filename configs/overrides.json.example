@@ -1,0 +1,18 @@
+{
+  "_comment": "Copy to overrides.json and customize. This file is git-ignored.",
+  "models": {
+    "open_teacher": "Qwen/Qwen2-1.5B-Instruct",
+    "open_student": "Qwen/Qwen2-0.5B-Instruct"
+  },
+  "services": {
+    "gradio_port": 7860,
+    "llama_server_port": 8089
+  },
+  "training": {
+    "batch_size": 8,
+    "learning_rate": 0.0002
+  },
+  "thermal": {
+    "threshold_celsius": 85.0
+  }
+}

@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -19,29 +20,14 @@ import tkinter as tk
 from tkinter import ttk
 from pathlib import Path
 
+from distill.infra.config import cfg
+
+logger = logging.getLogger(__name__)
+
 # Path to Macs Fan Control CLI
 MFC_CLI = "/Applications/Macs Fan Control.app/Contents/MacOS/Macs Fan Control"
 
-# Find mactop binary
-def _find_mactop():
-    import shutil
-    found = shutil.which("mactop")
-    if found:
-        return found
-    for candidate in [
-        "/opt/homebrew/bin/mactop",
-        "/usr/local/bin/mactop",
-        "/opt/homebrew/Cellar/mactop/2.0.9/bin/mactop",
-    ]:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    import glob
-    for p in sorted(glob.glob("/opt/homebrew/Cellar/mactop/*/bin/mactop"), reverse=True):
-        if os.access(p, os.X_OK):
-            return p
-    return None
-
-MACTOP_BIN = _find_mactop()
+MACTOP_BIN = cfg.paths.mactop_bin
 
 
 def is_mfc_app_running():
@@ -53,7 +39,8 @@ def is_mfc_app_running():
             timeout=2
         )
         return result.returncode == 0
-    except Exception:
+    except Exception as exc:
+        logger.error("is_mfc_app_running failed: %s", exc)
         return False
 
 
@@ -63,7 +50,7 @@ def launch_mfc_app():
         subprocess.Popen(["open", "-a", "Macs Fan Control"])
         return True
     except Exception as e:
-        print(f"Failed to launch Macs Fan Control: {e}")
+        logger.error("Failed to launch Macs Fan Control: %s", e)
         return False
 
 
@@ -201,7 +188,8 @@ class FanControlGUI:
                 "soc_temp": m.get("soc_temp", 0.0),
                 "total_power": m.get("total_power", 0.0),
             }
-        except Exception:
+        except Exception as exc:
+            logger.error("get_temps failed: %s", exc)
             return None
 
     def update_temps(self):
@@ -242,7 +230,7 @@ class FanControlGUI:
             self.fan_label.config(text=f"Current: {rpm} RPM")
             self.fan_slider.set(rpm)
         except Exception as e:
-            print(f"Failed to set fan speed: {e}")
+            logger.error("Failed to set fan speed: %s", e)
 
     def set_auto(self):
         """Return fan control to auto mode."""
@@ -256,7 +244,7 @@ class FanControlGUI:
             )
             self.fan_label.config(text="Current: Auto")
         except Exception as e:
-            print(f"Failed to set auto mode: {e}")
+            logger.error("Failed to set auto mode: %s", e)
 
     def apply_custom_rpm(self):
         """Apply the current slider value."""

@@ -15,49 +15,28 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
-import shutil
 import subprocess
 import time
 from datetime import datetime
 
+from distill.infra.config import cfg
+
+logger = logging.getLogger(__name__)
 
 # Path to Macs Fan Control CLI helper (set by the app on install)
 MFC_CLI = "/Applications/Macs Fan Control.app/Contents/MacOS/Macs Fan Control"
 
-# Resolve mactop binary — conda envs often don't include /opt/homebrew/bin in PATH
-def _find_mactop() -> str | None:
-    found = shutil.which("mactop")
-    if found:
-        return found
-    for candidate in [
-        "/opt/homebrew/bin/mactop",
-        "/usr/local/bin/mactop",
-        "/opt/homebrew/Cellar/mactop/2.0.9/bin/mactop",
-    ]:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    # Scan all Cellar versions
-    import glob
-    for p in sorted(glob.glob("/opt/homebrew/Cellar/mactop/*/bin/mactop"), reverse=True):
-        if os.access(p, os.X_OK):
-            return p
-    return None
+MACTOP_BIN = cfg.paths.mactop_bin
 
-MACTOP_BIN = _find_mactop()
-
-# Fan RPM curve: (temp_c, rpm) pairs — interpolated linearly between points
-FAN_CURVE = [
-    (60,  1200),   # below 60°C: minimum (auto floor)
-    (70,  2500),   # 70°C: start ramping
-    (80,  4000),   # 80°C: high
-    (90,  6000),   # 90°C: full speed
-]
+# Fan RPM curve: list of [temp_c, rpm] pairs — interpolated linearly between points
+FAN_CURVE = [tuple(pair) for pair in cfg.thermal.fan_curve]
 
 
 def sample_metrics():
     """Return dict with temps, power, and memory usage. Returns None on failure."""
-    if MACTOP_BIN is None:
+    if not os.path.isfile(MACTOP_BIN) or not os.access(MACTOP_BIN, os.X_OK):
         return None
     try:
         proc = subprocess.run(
@@ -82,7 +61,8 @@ def sample_metrics():
             "mem_total_gb": round(mem_total_gb, 1),
         }
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError,
-            json.JSONDecodeError, KeyError, IndexError):
+            json.JSONDecodeError, KeyError, IndexError) as exc:
+        logger.error("sample_metrics failed: %s", exc)
         return None
 
 
@@ -119,8 +99,8 @@ def apply_fan_speed(temp, threshold, max_temp):
         if _last_rpm is not None:
             try:
                 subprocess.run([MFC_CLI, "--set-auto"], capture_output=True, timeout=5)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.error("apply_fan_speed set-auto failed: %s", exc)
             _last_rpm = None
         return "auto"
 
@@ -135,7 +115,8 @@ def apply_fan_speed(temp, threshold, max_temp):
                     capture_output=True, timeout=5,
                 )
                 _last_rpm = rpm
-            except Exception:
+            except Exception as exc:
+                logger.error("apply_fan_speed set-rpm failed: %s", exc)
                 return None
         return rpm
     return _last_rpm
@@ -153,8 +134,8 @@ def main():
                     help="Enable automatic fan control via Macs Fan Control (requires admin auth)")
     args = ap.parse_args()
 
-    if MACTOP_BIN is None:
-        print("ERROR: mactop not found. Install with:  brew install mactop")
+    if not os.path.isfile(MACTOP_BIN) or not os.access(MACTOP_BIN, os.X_OK):
+        print(f"ERROR: mactop not executable at {MACTOP_BIN!r}. Install with:  brew install mactop")
         print("       Then re-run this script.")
         return
     print(f"mactop: {MACTOP_BIN}")

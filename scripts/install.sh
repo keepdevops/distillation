@@ -25,15 +25,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── shared models setup ──────────────────────────────────────────────────────
 if [ "$SHARED_MODELS" = true ]; then
-  MODEL_PATH="/Users/Shared/models"
+  MODEL_PATH="${MODEL_PATH:-/Users/Shared/models}"
   echo "=== Shared Model Storage Setup ==="
   [ -d "$MODEL_PATH" ] || { mkdir -p "$MODEL_PATH"; chmod 755 "$MODEL_PATH"; }
   echo "  Dir: $MODEL_PATH"
   ls -lh "$MODEL_PATH" | tail -n +2 | awk '{print "  " $0}'
   ZSHRC="$HOME/.zshrc"
-  if [ -f "$ZSHRC" ] && ! grep -q "MODEL_PATH=/Users/Shared/models" "$ZSHRC"; then
-    printf '\n# Model storage for distillation\nexport MODEL_PATH=/Users/Shared/models\n' >> "$ZSHRC"
+  _DEFAULT_MODEL_PATH="/Users/Shared/models"
+  if [ -f "$ZSHRC" ] && ! grep -q "MODEL_PATH=" "$ZSHRC"; then
+    printf '\n# Model storage for distillation\nexport MODEL_PATH=%s\n' "$MODEL_PATH" >> "$ZSHRC"
     echo "  Added MODEL_PATH to ~/.zshrc (reload: source ~/.zshrc)"
+  elif [ -f "$ZSHRC" ] && grep -q "MODEL_PATH=$_DEFAULT_MODEL_PATH" "$ZSHRC"; then
+    true  # already set to default; leave it alone
   fi
   echo "Done."
 fi
@@ -245,7 +248,7 @@ pix_pip \
   peft \
   evaluate \
   "trl>=0.10" \
-  "gradio>=4.0" \
+  "gradio>=6.0" \
   matplotlib seaborn tqdm rich psutil
 
 # ── Profile-specific packages ─────────────────────────────────────────────────
