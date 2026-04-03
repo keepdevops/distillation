@@ -19,44 +19,107 @@ The pipeline has five stages, plus an orthogonal set of optimization phases and 
 
 ---
 
+## Package Structure
+
+```
+distill/
+├── infra/              config.py, paths.py, train_utils.py, metrics_io.py
+├── orchestration/      agent.py, cmd_builder.py, arg_parser.py,
+│                       pipeline_steps.py, trial_loop.py,
+│                       export_utils.py, subprocess_runner.py
+├── training/
+│   └── backends/       mlx.py + mlx_trainer_state.py + mlx_memory.py
+│                       + mlx_precompute.py + mlx_loss.py + mlx_train_loop.py
+│                       sft.py, minillm.py, unsloth.py, forward.py
+├── data/               pipeline.py, filter.py, synth.py, magpie.py, domain/
+├── eval/               quality.py + quality_backend.py + quality_pipeline.py
+│                       + quality_teacher_eval.py
+│                       perplexity.py, benchmarks.py
+│                       gradio_ui.py + gradio_ui_css.py + gradio_ui_tabs.py
+│                       + gradio_ui_handlers.py + gradio_ui_help_text.py
+├── export/             gguf_pipeline.py, coreml.py
+├── backends/           universal_loader.py, model_format.py,
+│                       loader_backends.py, cpp_utils.py,
+│                       cpp_inference.py, mlx_utils.py
+├── monitoring/         fan_control.py, temp_logger.py, thermal.py, watchdog.py
+├── ui/                 dashboard.py + dashboard_discovery.py
+│                       + dashboard_thermal.py + dashboard_thermal_log.py
+│                       + dashboard_quality.py + dashboard_experiments.py
+│                       experiment_log.py, show_algorithms.py
+└── launch_ui/          main.py, ui.py, runner.py, discovery.py
+                        tabs/ (tab_configure, tab_data_prep, tab_domain,
+                               tab_eval, tab_expert, tab_logs, tab_help, wiring)
+
+configs/
+├── defaults.json       service ports, training hyperparams, eval/filter settings
+├── models.json         model registry (teacher/student IDs, cache lists)
+├── thermal.json        threshold_celsius, fan_curve
+└── overrides.json      (git-ignored) per-machine overrides
+
+scripts/
+├── install.sh          pixi env + llama.cpp + optional shared-models/thermal-agent
+├── run.sh              run pipeline (production|golden|phase2|smoke|download|export)
+└── services.sh         start|stop|monitor background services (tmux)
+```
+
+### CLI Entry Points
+
+```bash
+distill-agent       # python -m distill.orchestration.agent
+distill-ui          # python -m distill.launch_ui.main  (Gradio config UI)
+distill-dashboard   # python -m distill.ui.dashboard    (live run dashboard)
+distill-eval-ui     # python -m distill.eval.gradio_ui  (eval/judge UI)
+```
+
+### Config Override Hierarchy
+
+```
+env vars  >  configs/overrides.json  >  configs/*.json  >  dataclass defaults
+```
+
+Key env vars: `LLAMA_CPP_ROOT`, `DISTILL_PORT`, `DISTILL_OPEN_TEACHER`,
+`DISTILL_OPEN_STUDENT`, `DISTILL_LLAMA_SERVER_PORT`, `MACTOP_BIN`.
+
+---
+
 ## Five-Stage Pipeline
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Stage 0: Preparation (optional)                                │
-│  • Cache models/datasets offline    (cache_models.py)           │
-│  • Generate synthetic data          (generate_synthetic_data.py)│
-│  • SFT warmup / curriculum          (distill_sft.py)            │
+│  • Cache models/datasets offline    (distill.cache_models)      │
+│  • Generate synthetic data          (distill.data.synth)        │
+│  • SFT warmup / curriculum          (distill.training.backends.sft) │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │  Stage 1: Distillation Core                                     │
-│  pytorch  → distill_minillm.py   (MiniLLM reverse-KL + TRL)    │
-│  mlx      → distill_mlx.py       (MLX native, unified memory)  │
-│  unsloth  → distill_unsloth.py   (optimized LoRA kernels)       │
+│  pytorch  → distill.training.backends.minillm  (MiniLLM/TRL)   │
+│  mlx      → distill.training.backends.mlx      (MLX native)    │
+│  unsloth  → distill.training.backends.unsloth  (LoRA kernels)  │
 │  Output: trained weights + metrics.jsonl + trainer_state.json   │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │  Stage 2: Evaluation                                            │
-│  • run_eval.py         → validation perplexity + teacher gap    │
-│  • eval_quality.py     → quality gates, diversity, judge score  │
-│  • run_benchmarks.py   → WikiText-2 perplexity                  │
+│  • distill.eval.perplexity  → validation perplexity + gap       │
+│  • distill.eval.quality     → quality gates, diversity, judge   │
+│  • distill.eval.benchmarks  → WikiText-2 perplexity             │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │  Stage 3: Export  (--export all)                                │
-│  • GGUF      → llama.cpp convert → f16 / q8_0 / q4_K_M         │
-│  • CoreML    → coremltools → .mlpackage (ANE / on-device)       │
-│  • MLX       → mlx_lm.convert → quantized .npz (4-bit / 8-bit) │
+│  • GGUF      → distill.export.gguf_pipeline → f16/q8_0/q4_K_M  │
+│  • CoreML    → distill.export.coreml → .mlpackage (ANE)         │
+│  • MLX       → mlx_lm.convert → quantized .npz (4-bit/8-bit)   │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │  Stage 4: Agentic Feedback Loop                                 │
-│  • experiment_log.py    → append run record to JSONL            │
-│  • diagnose()           → human-readable suggestions            │
-│  • propose_next()       → next hyperparameter set               │
-│  • Winner selection     → lowest perplexity across trials       │
+│  • distill.ui.experiment_log  → append run record to JSONL      │
+│  • diagnose()                 → human-readable suggestions       │
+│  • propose_next()             → next hyperparameter set          │
+│  • Winner selection           → lowest perplexity across trials  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -104,7 +167,7 @@ airgap_bundle/
 python -m distill.run_distillation_agent --open --synthetic_data --n_synthetic 2000
 ```
 
-`generate_synthetic_data.py` uses the teacher model to generate instruction-response pairs from seed prompts. The process:
+`distill.data.synth` uses the teacher model to generate instruction-response pairs from seed prompts. The process:
 
 1. Load a small set of seed instructions from the training dataset
 2. Prompt the teacher to generate variations (with diverse topics, styles, lengths)
@@ -119,7 +182,7 @@ This is most valuable when the base dataset is small (<1000 samples) or narrow i
 python -m distill.run_distillation_agent --open --curriculum --sft_epochs 1 --epochs 2
 ```
 
-`distill_sft.py` runs a supervised fine-tuning pass on the student before knowledge distillation begins. It trains on ground-truth responses using standard cross-entropy loss (not KL divergence).
+`distill.training.backends.sft` runs a supervised fine-tuning pass on the student before knowledge distillation begins. It trains on ground-truth responses using standard cross-entropy loss (not KL divergence).
 
 **Why it helps:** Cold-starting KD from a randomly-initialized student forces large initial KL divergence and unstable gradients. SFT warmup gives the student a reasonable starting point — it already knows to produce plausible text before being asked to match the teacher's exact logit distribution. This is particularly important for:
 
@@ -165,7 +228,7 @@ Higher T (e.g., 1.5–2.0) flattens the distribution, amplifying the signal from
 
 **Mixed Loss (CE alpha):**
 
-In `distill_mlx.py`, the total loss is a weighted mix:
+In `distill.training.backends.mlx`, the total loss is a weighted mix:
 
 ```
 L_total = (1 - alpha) * L_KD + alpha * L_CE
@@ -232,7 +295,7 @@ Phase 1b: Student training loop (logits already in memory)
 
 This is the most important memory optimization: the teacher and student are never simultaneously on the GPU. Without this, an 8B teacher + 1B student would require ~20 GB VRAM.
 
-**Batching:** Teacher logit computation uses larger batch sizes than training (the teacher is in eval mode, no gradients). `distill_mlx.py` uses `--batch_size 4` for teacher logit batching by default. The logit computation speed depends primarily on the teacher's size and the number of samples.
+**Batching:** Teacher logit computation uses larger batch sizes than training (the teacher is in eval mode, no gradients). `distill.training.backends.mlx` uses `--batch_size 4` for teacher logit batching by default. The logit computation speed depends primarily on the teacher's size and the number of samples.
 
 ### 1.5 Gradient Accumulation
 
@@ -246,7 +309,7 @@ Default in `distill_mlx.py`: `--batch_size 2 --grad_acc 4` → effective batch =
 
 This matters for training stability: KD loss tends to be noisy at small batch sizes because individual samples' logit distributions vary widely. Larger effective batches smooth out this noise, leading to more stable convergence.
 
-In MLX, each micro-batch requires `mx.eval(loss_val, grads)` to force computation before accumulation (MLX uses lazy evaluation and won't compute until forced). After all micro-batches are accumulated, `mx.eval(accum_grads)` forces the final accumulated gradients, then the optimizer step runs.
+In MLX (`distill.training.backends.mlx_train_loop`), each micro-batch requires `mx.eval(loss_val, grads)` to force computation before accumulation (MLX uses lazy evaluation and won't compute until forced). After all micro-batches are accumulated, `mx.eval(accum_grads)` forces the final accumulated gradients, then the optimizer step runs.
 
 ### 1.6 Training Loop & Monitoring
 
@@ -806,7 +869,7 @@ cmake .. && cmake --build .
 ./watchdog ../../distilled-mlx --interval 60 --config ../../configs/watchdog_rules.json
 ```
 
-### Thermal Agent (`thermal_agent.py`)
+### Thermal Agent (`distill.monitoring.thermal`)
 
 System-wide hardware monitoring that pauses ALL GPU workloads (training, evaluation, export) when thermal limits are exceeded. Uses `mactop` for accurate M3 readings (SMC-based monitoring, which `osx-cpu-temp` cannot do on M3):
 
@@ -825,7 +888,7 @@ The thermal agent:
 Install as always-on LaunchAgent (recommended):
 
 ```bash
-./scripts/install_thermal_agent.sh
+./scripts/install.sh --thermal-agent
 launchctl list | grep thermal_agent
 ```
 
@@ -834,7 +897,7 @@ Observed M3 Max temperatures:
 - Under MPS training load: CPU ~49°C, GPU ~57°C
 - Thermal limit (85°C default): well above typical peaks — triggers only under extreme sustained load
 
-### Gradio Dashboard (`dashboard.py`)
+### Gradio Dashboard (`distill.ui.dashboard`)
 
 Multi-tab live monitoring UI:
 
@@ -847,7 +910,7 @@ Multi-tab live monitoring UI:
 | Experiments | `experiment_log.jsonl` | Post-run |
 
 ```bash
-python -m distill.dashboard --port 7860
+distill-dashboard --port 7860
 # Opens at http://127.0.0.1:7860
 ```
 
@@ -944,7 +1007,7 @@ The `--offline` flag sets `HF_HUB_OFFLINE=1` and `HF_DATASETS_OFFLINE=1`, which 
 
 ```bash
 # Let the agent find best config over 5 trials
-python -m distill.run_distillation_agent \
+python -m distill.orchestration.agent \
     --open --offline \
     --n_trials 5 \
     --export all \
@@ -976,8 +1039,8 @@ python -m distill.run_distillation_agent \
 #   → Print: [OK] Perplexity gap 17.3% (acceptable)
 
 # View results
-python -m distill.dashboard --runs_dir ./distilled-minillm
-python -m distill.experiment_log --show 10
+distill-dashboard --runs_dir ./distilled-minillm
+distill-eval-ui
 ```
 
 ---
