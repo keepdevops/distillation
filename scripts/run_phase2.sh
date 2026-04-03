@@ -33,7 +33,7 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [phase2] $*"; }
 run_variant() {
     local id="$1" cfg="$2"
     log "=== Starting run-$id (config: $cfg) ==="
-    pixi run python scripts/run_distillation_agent.py \
+    pixi run python -m distill.run_distillation_agent \
         --config "$cfg" \
         2>&1 | tee "runs/phase2-run${id}.log"
     log "=== Finished run-$id ==="

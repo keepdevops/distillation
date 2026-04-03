@@ -1,0 +1,10 @@
+node_modules/
+dist/
+build/
+# Large data files
+*.csv
+*.json
+*.sql
+*.sqlite
+*.sqlite3
+*.dump

@@ -26,17 +26,17 @@ The agent (`run_distillation_agent.py --export gguf`) handles conversion automat
 
 **Recommended — MLX backend:**
 ```bash
-python scripts/distill_mlx.py --open --output_dir ./distilled-mlx
+python -m distill.distill_mlx --open --output_dir ./distilled-mlx
 ```
 
 **Or PyTorch backend:**
 ```bash
-python scripts/distill_minillm.py --open --output_dir ./distilled-minillm
+python -m distill.distill_minillm --open --output_dir ./distilled-minillm
 ```
 
 **Or run the full agent (distill + export in one command):**
 ```bash
-python scripts/run_distillation_agent.py --open --backend mlx --export gguf
+python -m distill.run_distillation_agent --open --backend mlx --export gguf
 # GGUF saved to ./distilled-mlx/student-f16.gguf
 ```
 

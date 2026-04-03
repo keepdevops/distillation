@@ -37,10 +37,10 @@ Add `--watchdog` to any training command:
 
 ```bash
 # MLX backend (recommended)
-python scripts/distill_mlx.py --open --watchdog --output_dir ./distilled-mlx
+python -m distill.distill_mlx --open --watchdog --output_dir ./distilled-mlx
 
 # PyTorch backend
-python scripts/distill_minillm.py --open --watchdog --output_dir ./distilled-minillm
+python -m distill.distill_minillm --open --watchdog --output_dir ./distilled-minillm
 ```
 
 ### 2. Run watchdog in a separate terminal
@@ -49,14 +49,14 @@ python scripts/distill_minillm.py --open --watchdog --output_dir ./distilled-min
 
 ```bash
 # Continuous (every 60s)
-python scripts/training_watchdog.py ./distilled-mlx --interval 60
+python -m distill.training_watchdog ./distilled-mlx --interval 60
 
 # With config file
-python scripts/training_watchdog.py ./distilled-mlx --interval 60 \
+python -m distill.training_watchdog ./distilled-mlx --interval 60 \
   --config configs/watchdog_rules.json
 
 # One-off check
-python scripts/training_watchdog.py ./distilled-mlx --once
+python -m distill.training_watchdog ./distilled-mlx --once
 ```
 
 **C++** (no Python, lighter):
@@ -125,9 +125,9 @@ Thermal monitoring (CPU/GPU/SoC temperature) is handled by the **separate** `the
 
 ```bash
 # Run thermal agent alongside watchdog for complete protection
-python scripts/thermal_agent.py --watch . --threshold 85   # terminal 1
-python scripts/training_watchdog.py ./distilled-mlx        # terminal 2
-python scripts/distill_mlx.py --open --watchdog            # terminal 3
+python -m distill.thermal_agent --watch . --threshold 85   # terminal 1
+python -m distill.training_watchdog ./distilled-mlx        # terminal 2
+python -m distill.distill_mlx --open --watchdog            # terminal 3
 ```
 
 See [THERMAL_AGENT.md](../THERMAL_AGENT.md) for thermal agent setup.

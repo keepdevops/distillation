@@ -12,12 +12,12 @@ If you don't have access, use **open models** instead.
 
 **Recommended — MLX backend (2–5× faster on M3):**
 ```bash
-python scripts/distill_mlx.py --open --output_dir ./distilled-mlx
+python -m distill.distill_mlx --open --output_dir ./distilled-mlx
 ```
 
 **PyTorch backend:**
 ```bash
-python scripts/distill_minillm.py --open --output_dir ./distilled-minillm
+python -m distill.distill_minillm --open --output_dir ./distilled-minillm
 ```
 
 Both use **Qwen2-1.5B-Instruct** → **Qwen2-0.5B-Instruct** (no login required).
@@ -34,7 +34,7 @@ Both use **Qwen2-1.5B-Instruct** → **Qwen2-0.5B-Instruct** (no login required)
 
 Example with custom open pair:
 ```bash
-python scripts/distill_minillm.py \
+python -m distill.distill_minillm \
   --teacher Qwen/Qwen2-1.5B-Instruct \
   --student Qwen/Qwen2-0.5B-Instruct \
   --output_dir ./distilled-qwen
@@ -46,7 +46,7 @@ python scripts/distill_minillm.py \
 
 ```bash
 # Agent handles this automatically with --export gguf
-python scripts/run_distillation_agent.py --open --backend mlx --export gguf
+python -m distill.run_distillation_agent --open --backend mlx --export gguf
 
 # Or manually (llama.cpp at /Users/Shared/llama):
 ./scripts/export_student_gguf.sh ./distilled-mlx
@@ -59,5 +59,5 @@ python scripts/run_distillation_agent.py --open --backend mlx --export gguf
 ```bash
 huggingface-cli login
 # Accept license: https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct
-python scripts/distill_minillm.py --output_dir ./distilled-minillm
+python -m distill.distill_minillm --output_dir ./distilled-minillm
 ```

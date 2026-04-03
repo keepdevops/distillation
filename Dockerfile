@@ -8,7 +8,9 @@ COPY environment.yml /tmp/environment.yml
 RUN micromamba install -y -n base -f /tmp/environment.yml && micromamba clean -afy
 
 WORKDIR /app
-COPY scripts/ scripts/
+COPY distill/ distill/
+COPY pyproject.toml pyproject.toml
 COPY configs/ configs/
+RUN pip install --no-cache-dir -e .
 
-CMD ["python", "scripts/distill_minillm.py", "--help"]
+CMD ["python", "-m", "distill.distill_minillm", "--help"]

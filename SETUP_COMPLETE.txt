@@ -20,7 +20,7 @@ For other users on this Mac:
 
 Quick Test:
   export MODEL_PATH=/Users/Shared/models
-  python scripts/eval_gradio.py
+  python -m distill.eval_gradio
   
   # Or with MLX:
   mlx_lm.generate \

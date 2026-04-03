@@ -45,17 +45,17 @@ Run the cache scripts on staging (with network):
 
 **Meta Llama (requires HF login + license):**
 ```bash
-python scripts/cache_models.py --output ./hf_cache
+python -m distill.cache_models --output ./hf_cache
 ```
 
 **Open models (no auth):**
 ```bash
-python scripts/cache_models.py --open --output ./hf_cache
+python -m distill.cache_models --open --output ./hf_cache
 ```
 
 **Datasets** (use `--disk` for air-gapped: creates load_from_disk paths):
 ```bash
-python scripts/cache_datasets.py --output ./datasets_cache --disk
+python -m distill.cache_datasets --output ./datasets_cache --disk
 ```
 
 **Bartowski GGUF (curl, US origin):** Quantized models from Bartowski — HuggingFace US region, resolves to cdn-lfs-us-1:
@@ -160,7 +160,7 @@ export HF_DATASETS_CACHE=/path/to/copied/datasets_cache
 
 **Recommended — MLX backend (2–5× faster on M3):**
 ```bash
-python scripts/run_distillation_agent.py --offline --open \
+python -m distill.run_distillation_agent --offline --open \
   --backend mlx \
   --export gguf \
   --output_dir ./distilled-mlx
@@ -168,14 +168,14 @@ python scripts/run_distillation_agent.py --offline --open \
 
 **PyTorch backend — open models (no Meta license):**
 ```bash
-python scripts/distill_minillm.py --offline --open \
+python -m distill.distill_minillm --offline --open \
   --dataset /path/to/copied/datasets_cache/tatsu-lab_alpaca \
   --output_dir ./distilled-minillm
 ```
 
 **PyTorch backend — Meta Llama (requires pre-cached gated models):**
 ```bash
-python scripts/distill_minillm.py --offline \
+python -m distill.distill_minillm --offline \
   --teacher meta-llama/Llama-3.2-8B-Instruct \
   --student meta-llama/Llama-3.2-1B-Instruct \
   --dataset /path/to/copied/datasets_cache/tatsu-lab_alpaca \

@@ -21,29 +21,29 @@ The Distill project now includes a **universal Gradio interface** that can load 
 
 ```bash
 # PyTorch model (auto-detected)
-python scripts/eval_gradio.py --model_path ./distilled-minillm
+python -m distill.eval_gradio --model_path ./distilled-minillm
 
 # MLX model
-python scripts/eval_gradio.py --model_path ./distilled-mlx
+python -m distill.eval_gradio --model_path ./distilled-mlx
 
 # GGUF file
-python scripts/eval_gradio.py --model_path ./distilled-minillm/model-q4_0.gguf
+python -m distill.eval_gradio --model_path ./distilled-minillm/model-q4_0.gguf
 
 # Force specific backend
-python scripts/eval_gradio.py --model_path ./distilled-unsloth --backend pytorch
+python -m distill.eval_gradio --model_path ./distilled-unsloth --backend pytorch
 
 # Custom port
-python scripts/eval_gradio.py --model_path ./my-model --port 8080
+python -m distill.eval_gradio --model_path ./my-model --port 8080
 ```
 
 ### Full Dashboard
 
 ```bash
 # Launch dashboard with training plots + eval
-python scripts/dashboard.py --runs_dir .
+python -m distill.dashboard --runs_dir .
 
 # Custom port
-python scripts/dashboard.py --runs_dir . --port 7861
+python -m distill.dashboard --runs_dir . --port 7861
 ```
 
 ## Usage Guide
@@ -84,7 +84,7 @@ Instructions for running `eval_quality.py` with full quality metrics:
 - **Judge score (1–10)** — LLM-as-judge quality scoring
 
 ```bash
-python scripts/eval_quality.py ./your-model --judge --judge-teacher-ppl
+python -m distill.eval_quality ./your-model --judge --judge-teacher-ppl
 ```
 
 Results saved to `quality_metrics.json` in the model directory.
@@ -312,7 +312,7 @@ loader.generate(
 ### Example 1: Evaluate PyTorch Model
 
 ```bash
-python scripts/eval_gradio.py --model_path ./distilled-minillm
+python -m distill.eval_gradio --model_path ./distilled-minillm
 ```
 
 Opens UI at `http://127.0.0.1:7860` with:
@@ -324,10 +324,10 @@ Opens UI at `http://127.0.0.1:7860` with:
 
 ```bash
 # Terminal 1: PyTorch
-python scripts/eval_gradio.py --model_path ./distilled-minillm --port 7860
+python -m distill.eval_gradio --model_path ./distilled-minillm --port 7860
 
 # Terminal 2: GGUF
-python scripts/eval_gradio.py --model_path ./distilled-minillm/model-q4_0.gguf --port 7861
+python -m distill.eval_gradio --model_path ./distilled-minillm/model-q4_0.gguf --port 7861
 ```
 
 Compare speed and quality between formats!
@@ -335,7 +335,7 @@ Compare speed and quality between formats!
 ### Example 3: MLX Model
 
 ```bash
-python scripts/eval_gradio.py --model_path ./distilled-mlx --backend mlx
+python -m distill.eval_gradio --model_path ./distilled-mlx --backend mlx
 ```
 
 Uses MLX backend for Apple Silicon optimized inference.
@@ -343,7 +343,7 @@ Uses MLX backend for Apple Silicon optimized inference.
 ### Example 4: Full Dashboard
 
 ```bash
-python scripts/dashboard.py --runs_dir .
+python -m distill.dashboard --runs_dir .
 ```
 
 Shows:

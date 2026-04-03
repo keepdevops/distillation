@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "distill"
+version = "0.1.0"
+description = "On-device LLM knowledge distillation toolkit"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+[project.scripts]
+distill-agent = "distill.orchestration.agent:main"
+distill-ui = "distill.launch_ui.main:main"
+distill-dashboard = "distill.ui.dashboard:main"
+distill-eval-ui = "distill.eval.gradio_ui:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["distill*"]
