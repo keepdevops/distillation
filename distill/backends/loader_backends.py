@@ -69,6 +69,20 @@ def load_pytorch(model_path: str) -> Tuple[bool, str, Any, Any]:
         return False, f"PyTorch load error: {e}", None, None
 
 
+def _fix_tokenizer_config(path: Path) -> None:
+    """Fix tokenizer_config.json if extra_special_tokens is a list (not a dict)."""
+    cfg_path = path / "tokenizer_config.json"
+    if not cfg_path.exists():
+        return
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    if isinstance(cfg.get("extra_special_tokens"), list):
+        LOG.warning("Fixing extra_special_tokens: converting list→dict in %s", cfg_path)
+        cfg["extra_special_tokens"] = {}
+        with open(cfg_path, "w") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
 def load_mlx(model_path: str) -> Tuple[bool, str, Any, Any]:
     """Load an MLX model using mlx_lm."""
     try:
@@ -77,6 +91,7 @@ def load_mlx(model_path: str) -> Tuple[bool, str, Any, Any]:
         path = Path(model_path)
 
         if (path / "config.json").exists():
+            _fix_tokenizer_config(path)
             model, tokenizer = mlx_lm.load(str(path))
             return True, f"Loaded MLX model: {path.name}", model, tokenizer
 

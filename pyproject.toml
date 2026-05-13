@@ -18,4 +18,4 @@ distill-eval-ui = "distill.eval.gradio_ui:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["distill*"]
+include = ["distill*", "distil*"]

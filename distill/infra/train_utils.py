@@ -9,18 +9,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import torch
 
-
-def get_device() -> torch.device:
+def get_device():
     """Return the best available torch device: mps > cuda > cpu."""
+    import torch
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def clear_device_cache(device: torch.device) -> None:
+def clear_device_cache(device) -> None:
     """Free any cached memory for the given device (MPS or CUDA)."""
+    import torch
     if device.type == "mps":
         torch.mps.empty_cache()
     elif device.type == "cuda":
@@ -51,12 +51,13 @@ def write_metric(metrics_path: Path, step: int, epoch: float, **kwargs) -> None:
 
 
 def load_student_model(checkpoint_dir: Path, student_id: str, cache_dir, offline: bool,
-                       device: torch.device):
+                       device):
     """Load model + tokenizer from checkpoint_dir, handling LoRA adapter checkpoints.
 
     Returns:
         (model, tokenizer) — model is merged, eval mode, on device.
     """
+    import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     checkpoint_dir = Path(checkpoint_dir)

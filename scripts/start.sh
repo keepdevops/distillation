@@ -64,7 +64,7 @@ echo "    watchdog       → $SESSION:watchdog"
 tmux new-window -t "$SESSION" -n "dashboard"
 if [ "$EVAL_UI" = true ]; then
   tmux send-keys -t "$SESSION:dashboard" \
-    "caffeinate -dims pixi run python $SCRIPT_DIR/eval_gradio.py 2>&1 | tee -a $ROOT_DIR/eval_gradio.log" Enter
+    "caffeinate -dims pixi run python -m distill.eval_gradio 2>&1 | tee -a $ROOT_DIR/eval_gradio.log" Enter
   echo "    eval_gradio    → $SESSION:dashboard  (http://127.0.0.1:7860)"
 else
   tmux send-keys -t "$SESSION:dashboard" \

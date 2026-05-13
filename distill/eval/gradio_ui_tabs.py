@@ -87,7 +87,6 @@ def build_generate_tab() -> dict:
         lines=14,
         interactive=False,
         elem_classes="output-box",
-        show_copy_button=True,
     )
 
     gr.Examples(
@@ -111,43 +110,8 @@ def build_generate_tab() -> dict:
 
 
 def build_batch_eval_tab(path: str) -> None:
-    """Render the 'Batch Eval' tab.  No widgets to return.
-
-    Must be called inside a ``gr.Tab`` context.
-    """
-    gr.Markdown(f"""
-### Batch Quality Evaluation
-
-Run `eval_quality.py` on **{Path(path).name}** for comprehensive quality metrics:
-
-```bash
-# Basic quality eval (diversity + quality gates)
-python -m distill.eval.quality {path}
-
-# With LLM-as-judge scoring
-python -m distill.eval.quality {path} --judge --teacher Qwen/Qwen2-1.5B-Instruct
-
-# With teacher perplexity on student outputs (per-sample, not batch-average)
-python -m distill.eval.quality {path} --judge-teacher-ppl
-
-# All metrics together
-python -m distill.eval.quality {path} --judge --judge-teacher-ppl
-```
-
-**What it measures:**
-
-| Metric | Description |
-|--------|-------------|
-| Distinct-1 / Distinct-2 | Lexical diversity (higher = more varied) |
-| 3-gram entropy | Generation variety across all outputs |
-| Refusal rate | % of outputs that are refusals (gate: <5%) |
-| Quality gate pass rate | % passing length + refusal filters |
-| Category distribution | math / code / creative / reasoning / qa / other |
-| Teacher PPL (per sample) | Per-sample teacher perplexity on student outputs |
-| Judge score (1–10) | LLM-as-judge instruction-following quality |
-
-Results saved to: `{path}/quality_metrics.json`
-""")
+    """Stub kept for import compatibility. Interactive eval tab is in gradio_ui_tab_eval.py."""
+    pass
 
 
 def build_algorithms_tab() -> None:
@@ -172,6 +136,98 @@ def build_algorithms_tab() -> None:
             f"\u26a0\ufe0f Could not load algorithms: `{exc}`\n\n"
             "Run `python -m distill.show_algorithms` directly."
         )
+
+
+def build_magpie_tab() -> dict:
+    """Render the 'Magpie Synth' tab and return widget references.
+
+    Must be called inside a ``gr.Tab`` context.
+
+    Returns:
+        Dict with keys: ``teacher``, ``domain``, ``n_pairs``, ``output_dir``,
+        ``backend``, ``batch_size``, ``inst_temp``, ``resp_temp``,
+        ``filter_chk``, ``target_n``, ``run_btn``, ``log_box``.
+    """
+    gr.Markdown(
+        "### \U0001f9f2 Magpie Self-Synthesis\n"
+        "Auto-generate `(instruction, response)` pairs from a teacher model by "
+        "conditioning on its chat-template user-turn prefix.\n\n"
+        "_Reference: Xu et al., 2024_"
+    )
+
+    with gr.Row():
+        teacher = gr.Textbox(
+            label="Teacher model",
+            value="Qwen/Qwen2-1.5B-Instruct",
+            placeholder="HF model id or local path",
+            scale=3,
+        )
+        domain = gr.Dropdown(
+            choices=["general", "code", "math", "creative", "science", "reasoning"],
+            value="general",
+            label="Domain",
+            scale=1,
+        )
+
+    with gr.Row():
+        n_pairs = gr.Slider(100, 50000, value=1000, step=100, label="Pairs to generate", scale=3)
+        backend = gr.Dropdown(
+            choices=["auto", "mlx", "mps", "cuda", "cpu"],
+            value="auto",
+            label="Backend",
+            scale=1,
+        )
+
+    with gr.Row():
+        inst_temp = gr.Slider(0.0, 2.0, value=0.9, step=0.05, label="Instruction temp", scale=2)
+        resp_temp = gr.Slider(0.0, 2.0, value=0.7, step=0.05, label="Response temp", scale=2)
+        batch_size = gr.Slider(4, 128, value=32, step=4, label="Batch size", scale=2)
+
+    with gr.Row():
+        output_dir = gr.Textbox(
+            label="Output directory",
+            value="./magpie_data",
+            scale=3,
+        )
+        filter_chk = gr.Checkbox(label="Run deep filter after generation", value=False, scale=1)
+
+    with gr.Row():
+        target_n = gr.Number(
+            label="Filter target (0 = keep all)",
+            value=0,
+            minimum=0,
+            precision=0,
+            scale=1,
+        )
+        run_btn = gr.Button(
+            "\U0001f680 Run Magpie",
+            variant="primary",
+            elem_classes="btn-primary",
+            scale=1,
+            min_width=160,
+        )
+
+    log_box = gr.Textbox(
+        label="Output log",
+        lines=18,
+        interactive=False,
+        elem_classes="output-box",
+    )
+
+    return {
+        "teacher": teacher,
+        "domain": domain,
+        "n_pairs": n_pairs,
+        "output_dir": output_dir,
+        "backend": backend,
+        "batch_size": batch_size,
+        "inst_temp": inst_temp,
+        "resp_temp": resp_temp,
+        "filter_chk": filter_chk,
+        "target_n": target_n,
+        "run_btn": run_btn,
+        "log_box": log_box,
+    }
 
 
 def build_help_tab(path: str) -> None:
