@@ -86,13 +86,40 @@ def _stream_output(proc: subprocess.Popen) -> None:
             pass
 
 
+def _seed_loss_history_from_dir(output_dir: str | Path) -> list[dict]:
+    """Pre-populate loss history from a metrics.jsonl that already exists."""
+    from ..infra.metrics_io import load_metrics
+    try:
+        rows = load_metrics(output_dir)
+    except Exception:
+        return []
+    result = []
+    for row in rows:
+        if "loss" not in row and "eval_loss" not in row:
+            continue
+        entry: dict = {"step": row.get("step", 0)}
+        if "loss" in row:
+            entry["loss"] = row["loss"]
+        elif "eval_loss" in row:
+            entry["loss"] = row["eval_loss"]
+        if "grad_norm" in row:
+            entry["grad_norm"] = row["grad_norm"]
+        result.append(entry)
+    return result
+
+
 def _start_proc(cmd: list[str]) -> tuple[str, str]:
     global _proc, _log_queue, _loss_history, _loss_step_counter, _run_log_fh, _run_json_fh
     if _proc is not None and _proc.poll() is None:
         return "A run is already in progress. Stop it first.", _run_status()
     _log_queue = queue.Queue()
+    # Seed from existing metrics if output_dir already has training data
     _loss_history = []
-    _loss_step_counter = 0
+    if "--output_dir" in cmd:
+        idx = cmd.index("--output_dir")
+        if idx + 1 < len(cmd):
+            _loss_history = _seed_loss_history_from_dir(cmd[idx + 1])
+    _loss_step_counter = len(_loss_history)
     for _fh in (_run_log_fh, _run_json_fh):
         if _fh:
             try:

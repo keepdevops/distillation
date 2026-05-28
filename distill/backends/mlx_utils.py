@@ -78,7 +78,7 @@ def load_mlx_model(model_path: str, student_name: str | None = None):
             return model, tokenizer
 
     logger.info("Loading MLX model from %s", p)
-    model, tokenizer = load(str(p))
+    model, tokenizer = load(p if p.exists() else model_path)
     return model, tokenizer
 
 
