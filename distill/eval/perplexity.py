@@ -25,6 +25,7 @@ from ..infra.train_utils import get_device, load_student_model
 from ..backends.mlx_utils import is_mlx_available, load_mlx_model, compute_mlx_perplexity
 from ..backends.cpp_inference import compute_gguf_perplexity
 from ..backends.cpp_utils import is_cpp_available, find_gguf
+from ..infra.config import cfg
 from .perplexity_utils import (  # noqa: F401 — re-exported for callers
     detect_step, last_step_in_jsonl, eval_loss, eval_model_at_path,
 )
@@ -32,23 +33,21 @@ from .perplexity_utils import (  # noqa: F401 — re-exported for callers
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-OPEN_STUDENT = "Qwen/Qwen2-0.5B-Instruct"
-
 
 def parse_args():
     p = argparse.ArgumentParser(description="Standalone eval for distilled model")
     p.add_argument("output_dir", type=str, help="Training output dir (metrics.jsonl written here)")
     p.add_argument("--checkpoint", type=str, default=None,
                    help="Model checkpoint dir to eval (default: output_dir itself)")
-    p.add_argument("--student", type=str, default=OPEN_STUDENT,
+    p.add_argument("--student", type=str, default=cfg.models.open_student,
                    help="Base model id (for tokenizer if checkpoint has none)")
-    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca")
+    p.add_argument("--dataset", type=str, default=cfg.models.default_dataset)
     p.add_argument("--max_samples", type=int, default=2000)
     p.add_argument("--val_size", type=float, default=0.02)
     p.add_argument("--max_val_samples", type=int, default=200,
                    help="Cap validation samples to keep eval fast")
-    p.add_argument("--max_length", type=int, default=256)
-    p.add_argument("--batch_size", type=int, default=8, help="Batch size for evaluation (default: 8)")
+    p.add_argument("--max_length", type=int, default=cfg.eval.max_length)
+    p.add_argument("--batch_size", type=int, default=cfg.eval.batch_size, help="Batch size for evaluation (default: 8)")
     p.add_argument("--step", type=int, default=None,
                    help="Step number to record in metrics.jsonl (default: auto-detect from checkpoint)")
     add_cache_and_offline(p)
@@ -56,7 +55,7 @@ def parse_args():
                    help="Inference backend: gguf (llama.cpp/Metal) > mlx > pytorch for speed (default: auto)")
     p.add_argument("--compare_teacher", action="store_true",
                    help="Also eval teacher model and log perplexity gap")
-    p.add_argument("--teacher", type=str, default="Qwen/Qwen2-1.5B-Instruct",
+    p.add_argument("--teacher", type=str, default=cfg.models.open_teacher,
                    help="Teacher model id or path (used with --compare_teacher)")
     p.add_argument("--quant_dir", type=str, default=None,
                    help="Path to quantized HF-format model dir to compare against student")

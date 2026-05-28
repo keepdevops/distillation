@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 
-from distill.data_pipeline import (
+from distill.data.pipeline import (
     _detect_schema,
     _extract_pair,
     format_prompt_full,

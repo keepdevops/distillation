@@ -1,5 +1,3 @@
-#!/bin/bash
-set -e
-cd "$(dirname "$0")/.."
-mkdir -p runs
-exec .pixi/envs/default/bin/python -m distill.run_distillation_agent --config configs/golden_pipeline.json "$@"
+#!/usr/bin/env bash
+# Compatibility shim — delegates to run.sh golden
+exec "$(dirname "$0")/run.sh" golden "$@"

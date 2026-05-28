@@ -32,6 +32,7 @@ from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 
 from ...data.pipeline import load_dataset_split, format_prompt_only, validate_dataset_schema, DATASET_HELP
+from ...infra.config import cfg
 from ...infra.train_utils import get_device
 from .sft_dataset import SFTDataset, generate_labels  # noqa: F401 — re-exported for callers
 from transformers import (
@@ -44,29 +45,26 @@ from transformers import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-OPEN_TEACHER = "Qwen/Qwen2-1.5B-Instruct"
-OPEN_STUDENT = "Qwen/Qwen2-0.5B-Instruct"
-
 
 def parse_args():
     p = argparse.ArgumentParser(description="SFT warmup for curriculum distillation")
-    p.add_argument("--teacher", type=str, default="meta-llama/Llama-3.2-8B-Instruct")
-    p.add_argument("--student", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
+    p.add_argument("--teacher", type=str, default=cfg.models.default_teacher)
+    p.add_argument("--student", type=str, default=cfg.models.default_student)
     p.add_argument("--open", action="store_true",
                    help="Use open Qwen2 models (no HF login)")
-    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca", help=DATASET_HELP)
+    p.add_argument("--dataset", type=str, default=cfg.models.default_dataset, help=DATASET_HELP)
     p.add_argument("--output_dir", type=str, default="./distilled-minillm")
     p.add_argument("--epochs", type=int, default=1,
                    help="SFT warmup epochs (default: 1 — just one pass)")
-    p.add_argument("--batch_size", type=int, default=8, help="Physical batch size (default: 8, optimized for M3 Max)")
+    p.add_argument("--batch_size", type=int, default=cfg.training.batch_size, help="Physical batch size (default: 8, optimized for M3 Max)")
     p.add_argument("--grad_acc", type=int, default=8, help="Gradient accumulation steps (default: 8, effective batch = 64)")
-    p.add_argument("--lora_r", type=int, default=64)
+    p.add_argument("--lora_r", type=int, default=cfg.training.lora_r)
     p.add_argument("--max_samples", type=int, default=2000)
     p.add_argument("--max_new_tokens", type=int, default=128,
                    help="Max tokens teacher generates per prompt")
     p.add_argument("--max_length", type=int, default=384,
                    help="Max token length for training sequences")
-    p.add_argument("--learning_rate", type=float, default=2e-4)
+    p.add_argument("--learning_rate", type=float, default=cfg.training.learning_rate)
     p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--offline", action="store_true")
     p.add_argument("--watchdog", action="store_true",
@@ -81,8 +79,8 @@ def parse_args():
 def main():
     args = parse_args()
     if args.open:
-        args.teacher = OPEN_TEACHER
-        args.student = OPEN_STUDENT
+        args.teacher = cfg.models.open_teacher
+        args.student = cfg.models.open_student
         logger.info("Using open models: teacher=%s  student=%s", args.teacher, args.student)
 
     import random as _random
@@ -205,7 +203,7 @@ def main():
 
     callbacks = []
     if args.watchdog:
-        from .watchdog_callbacks import PauseFlagCallback
+        from distill.infra.watchdog_callbacks import PauseFlagCallback
         callbacks.append(PauseFlagCallback(str(sft_dir)))
 
     trainer = Trainer(

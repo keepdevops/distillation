@@ -122,6 +122,9 @@ temp/
 .env.local
 *.local.json
 
+# Local config overrides (copy from configs/overrides.json.example)
+configs/overrides.json
+
 # macOS
 .DS_Store
 .AppleDouble

@@ -9,11 +9,13 @@ import logging
 import os
 from pathlib import Path
 
+from ..infra.config import cfg
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-
-DEFAULT_MODELS = [
+# Fallback lists used when cfg.models.cache_models is empty
+_DEFAULT_MODELS = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "meta-llama/Llama-3.2-8B-Instruct",
     "distilbert-base-uncased",
@@ -21,11 +23,13 @@ DEFAULT_MODELS = [
 ]
 
 OPEN_MODELS = [
-    "Qwen/Qwen2-0.5B-Instruct",
-    "Qwen/Qwen2-1.5B-Instruct",
+    cfg.models.open_student,
+    cfg.models.open_teacher,
     "distilbert-base-uncased",
     "bert-large-uncased",
 ]
+
+DEFAULT_MODELS = cfg.models.cache_models or _DEFAULT_MODELS
 
 
 def main():
@@ -56,7 +60,7 @@ def main():
                 AutoModelForSequenceClassification.from_pretrained(name, cache_dir=args.output)
             logger.info("  Cached: %s", name)
         except Exception as e:
-            logger.warning("  Failed %s: %s", name, e)
+            logger.error("  Failed %s: %s", name, e)
     logger.info("Models cached to %s", args.output)
 
 

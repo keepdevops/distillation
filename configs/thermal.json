@@ -1,0 +1,11 @@
+{
+  "_comment": "Thermal monitoring and fan control config for Apple Silicon.",
+  "threshold_celsius": 85.0,
+  "interval_seconds": 30,
+  "fan_curve": [
+    [60, 1200],
+    [70, 2500],
+    [80, 4000],
+    [90, 6000]
+  ]
+}

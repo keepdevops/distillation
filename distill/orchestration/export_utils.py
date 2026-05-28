@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 
+from distill.infra.config import cfg
 from .subprocess_runner import run_cmd, find_llama_cpp
 
 LOG = logging.getLogger(__name__)
@@ -65,7 +66,8 @@ def _mlx_weights_to_hf_dir(output_dir: Path) -> Path:
         import mlx.core as mx
         raw = mx.load(str(npz_path))
         weights = {k: np.array(v.astype(mx.float32)) for k, v in raw.items()}
-    except Exception:
+    except Exception as exc:
+        LOG.error("mlx.core load failed (%s); falling back to numpy npz loader", exc)
         weights = {k: v.astype(np.float32) for k, v in np.load(str(npz_path)).items()}
 
     all_keys = set(weights)
@@ -139,7 +141,17 @@ def export_gguf(output_dir: Path, project_root: Path, outtype: str) -> None:
 
     convert_script = llama_cpp / "convert_hf_to_gguf.py"
     out_name = output_dir.name + f"-{outtype}.gguf"
-    gguf_dir = Path("/Users/Shared/llama/models")
+    if cfg.paths.llama_models_dir is not None:
+        gguf_dir = cfg.paths.llama_models_dir
+    elif cfg.paths.llama_cpp_root is not None:
+        gguf_dir = cfg.paths.llama_cpp_root / "models"
+    else:
+        gguf_dir = output_dir / "gguf_export"
+        LOG.warning(
+            "llama_models_dir not configured; writing GGUF to %s. "
+            "Set LLAMA_CPP_ROOT or LLAMA_CPP_MODELS_DIR to change this.",
+            gguf_dir,
+        )
     gguf_dir.mkdir(parents=True, exist_ok=True)
     out_file = gguf_dir / out_name
     run_cmd(
@@ -149,24 +161,34 @@ def export_gguf(output_dir: Path, project_root: Path, outtype: str) -> None:
     )
     LOG.info("GGUF saved: %s", out_file)
 
+    llama_server_bin = (
+        str(cfg.paths.llama_cpp_root / "llama-server")
+        if cfg.paths.llama_cpp_root is not None
+        else "llama-server"
+    )
+    server_port = cfg.services.llama_server_port
     if outtype in ("f16", "bf16", "f32"):
-        quantize_bin = Path("/Users/Shared/llama/llama-quantize")
-        if not quantize_bin.exists():
+        quantize_bin = (
+            cfg.paths.llama_cpp_root / "llama-quantize"
+            if cfg.paths.llama_cpp_root is not None
+            else None
+        )
+        if quantize_bin is None or not quantize_bin.exists():
             quantize_bin = llama_cpp / "llama-quantize"
         if quantize_bin.exists():
             q4_file = gguf_dir / (output_dir.name + "-Q4_K_M.gguf")
             LOG.info("Running llama-quantize → Q4_K_M: %s", q4_file)
             run_cmd([str(quantize_bin), str(out_file), str(q4_file), "Q4_K_M"], project_root)
             LOG.info("Q4_K_M saved: %s (deploy this one)", q4_file)
-            LOG.info("Serve with: /Users/Shared/llama/llama-server -m %s", q4_file)
+            LOG.info("Serve with: %s --port %d -m %s", llama_server_bin, server_port, q4_file)
         else:
             LOG.warning(
                 "llama-quantize not found at %s — skipping Q4_K_M quantization.",
                 quantize_bin,
             )
-            LOG.info("Serve with: /Users/Shared/llama/llama-server -m %s", out_file)
+            LOG.info("Serve with: %s --port %d -m %s", llama_server_bin, server_port, out_file)
     else:
-        LOG.info("Serve with: /Users/Shared/llama/llama-server -m %s", out_file)
+        LOG.info("Serve with: %s --port %d -m %s", llama_server_bin, server_port, out_file)
 
 
 def export_coreml(output_dir: Path, project_root: Path, quantize: str | None) -> None:

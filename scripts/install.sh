@@ -1,288 +1,186 @@
 #!/usr/bin/env bash
-# install.sh — Detect hardware and install distill dependencies accordingly
-# Supports: macOS (Apple Silicon / Intel), Linux (NVIDIA / CPU)
+# install.sh — Interactive setup for the distill project
+#
+# Usage:
+#   ./scripts/install.sh                              # interactive wizard
+#   ./scripts/install.sh --yes                        # non-interactive full install
+#   ./scripts/install.sh --shared-models              # storage dirs + env vars only
+#   ./scripts/install.sh --thermal-agent              # LaunchAgent only
+#   ./scripts/install.sh --vllm                       # vLLM only (NVIDIA)
+#   ./scripts/install.sh --full                       # full install, skip wizard
+#
+# Config flags (usable with any mode):
+#   --model-path PATH    override MODEL_PATH  (default: /Users/Shared/llama/models)
+#   --llama-root PATH    override LLAMA_CPP_ROOT (default: /Users/Shared/llama)
+#   --threshold N        thermal pause threshold °C  (default: 85)
+#   --interval N         thermal poll interval sec   (default: 30)
+
 set -euo pipefail
 
-# ── colours ──────────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ── colour helpers ────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
-
 info()    { echo -e "${BLUE}[INFO]${NC}  $*"; }
 ok()      { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 section() { echo -e "\n${BOLD}═══ $* ═══${NC}"; }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# ── prompt helpers ────────────────────────────────────────────────────────────
+prompt_yn() {   # prompt_yn "Question" y|n  →  returns 0 (yes) or 1 (no)
+  local q="$1" def="${2:-y}" hint ans
+  [[ "$def" == "y" ]] && hint="Y/n" || hint="y/N"
+  read -r -p "  $q [$hint]: " ans </dev/tty
+  [[ "${ans:-$def}" =~ ^[Yy] ]]
+}
 
-# ── 1. Detect OS ──────────────────────────────────────────────────────────────
-section "Detecting System"
+prompt_val() {  # prompt_val "Question" "default"  →  echoes chosen value
+  local q="$1" def="$2" ans
+  read -r -p "  $q [$def]: " ans </dev/tty
+  echo "${ans:-$def}"
+}
 
-OS="unknown"
-case "$(uname -s)" in
-  Darwin) OS="macos" ;;
-  Linux)  OS="linux" ;;
-  *)      error "Unsupported OS: $(uname -s)"; exit 1 ;;
-esac
-info "OS: $OS"
+# ── arg parsing ───────────────────────────────────────────────────────────────
+DO_FULL=false; DO_SHARED=false; DO_THERMAL=false; DO_VLLM=false
+EXPLICIT=false; NONINTERACTIVE=false
 
-# ── 2. Detect Architecture ───────────────────────────────────────────────────
-ARCH="$(uname -m)"
-info "Architecture: $ARCH"
+MODEL_PATH="${MODEL_PATH:-/Users/Shared/llama/models}"
+LLAMA_CPP_ROOT="${LLAMA_CPP_ROOT:-/Users/Shared/llama}"
+THRESHOLD=85; INTERVAL=30
 
-# ── 3. Detect Apple Silicon chip generation ───────────────────────────────────
-APPLE_CHIP=""
-IS_APPLE_SILICON=false
-if [[ "$OS" == "macos" ]]; then
-  if [[ "$ARCH" == "arm64" ]]; then
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yes|-y)           NONINTERACTIVE=true; DO_FULL=true; DO_SHARED=true ;;
+    --full)             DO_FULL=true;   EXPLICIT=true ;;
+    --shared-models)    DO_SHARED=true; EXPLICIT=true ;;
+    --thermal-agent)    DO_THERMAL=true; EXPLICIT=true ;;
+    --vllm)             DO_VLLM=true;   EXPLICIT=true ;;
+    --model-path)       MODEL_PATH="$2"; shift ;;
+    --model-path=*)     MODEL_PATH="${1#*=}" ;;
+    --llama-root)       LLAMA_CPP_ROOT="$2"; shift ;;
+    --llama-root=*)     LLAMA_CPP_ROOT="${1#*=}" ;;
+    --threshold)        THRESHOLD="$2"; shift ;;
+    --threshold=*)      THRESHOLD="${1#*=}" ;;
+    --interval)         INTERVAL="$2"; shift ;;
+    --interval=*)       INTERVAL="${1#*=}" ;;
+    *) error "Unknown flag: $1"; exit 1 ;;
+  esac
+  shift
+done
+
+WIZARD=false
+[[ "$EXPLICIT" == false && "$NONINTERACTIVE" == false ]] && WIZARD=true
+
+# ── hardware detection ────────────────────────────────────────────────────────
+detect_hardware() {
+  OS="unknown"; ARCH="$(uname -m)"; RAM_GB=0
+  IS_APPLE_SILICON=false; APPLE_CHIP=""; HAS_NVIDIA=false; NVCC_VERSION=""
+
+  case "$(uname -s)" in
+    Darwin) OS="macos" ;;
+    Linux)  OS="linux" ;;
+    *)      error "Unsupported OS: $(uname -s)"; exit 1 ;;
+  esac
+
+  if [[ "$OS" == "macos" && "$ARCH" == "arm64" ]]; then
     IS_APPLE_SILICON=true
-    # sysctl returns something like "Apple M3 Max"
-    CHIP_RAW="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
-    if [[ -z "$CHIP_RAW" ]]; then
-      CHIP_RAW="$(system_profiler SPHardwareDataType 2>/dev/null | grep 'Chip' | awk -F': ' '{print $2}' | xargs || true)"
-    fi
-    APPLE_CHIP="$CHIP_RAW"
-    ok "Apple Silicon detected: $APPLE_CHIP"
-  else
-    warn "macOS with Intel CPU — MLX not available"
+    APPLE_CHIP="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+    [[ -z "$APPLE_CHIP" ]] && \
+      APPLE_CHIP="$(system_profiler SPHardwareDataType 2>/dev/null \
+        | awk -F': ' '/Chip/{print $2}' | xargs || true)"
   fi
-fi
 
-# ── 4. Detect RAM ─────────────────────────────────────────────────────────────
-RAM_GB=0
-if [[ "$OS" == "macos" ]]; then
-  RAM_BYTES="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
-  RAM_GB=$(( RAM_BYTES / 1024 / 1024 / 1024 ))
-elif [[ "$OS" == "linux" ]]; then
-  RAM_KB="$(grep MemTotal /proc/meminfo | awk '{print $2}')"
-  RAM_GB=$(( RAM_KB / 1024 / 1024 ))
-fi
-info "RAM: ${RAM_GB} GB"
+  if [[ "$OS" == "macos" ]]; then
+    RAM_GB=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 / 1024 ))
+  else
+    RAM_GB=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024 ))
+  fi
 
-# ── 5. Detect NVIDIA GPU (Linux / Windows) ───────────────────────────────────
-HAS_NVIDIA=false
-CUDA_VERSION=""
-if command -v nvidia-smi &>/dev/null; then
-  if nvidia-smi &>/dev/null 2>&1; then
+  if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null 2>&1; then
     HAS_NVIDIA=true
-    CUDA_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)"
     NVCC_VERSION="$(nvcc --version 2>/dev/null | grep release | awk '{print $6}' | tr -d ',' || true)"
-    ok "NVIDIA GPU detected (driver: $CUDA_VERSION, nvcc: ${NVCC_VERSION:-not found})"
   fi
-fi
 
-# ── 6. Summarise profile ──────────────────────────────────────────────────────
-section "Installation Profile"
+  PROFILE="cpu"
+  $IS_APPLE_SILICON && PROFILE="apple_silicon"
+  $HAS_NVIDIA       && PROFILE="nvidia"
+}
 
-PROFILE="cpu"
-if $IS_APPLE_SILICON; then
-  PROFILE="apple_silicon"
-elif $HAS_NVIDIA; then
-  PROFILE="nvidia"
-fi
+# ── interactive wizard ────────────────────────────────────────────────────────
+run_wizard() {
+  echo -e "\n${BOLD}╔══════════════════════════════════╗${NC}"
+  echo -e "${BOLD}║   Distill Installer Wizard  v1   ║${NC}"
+  echo -e "${BOLD}╚══════════════════════════════════╝${NC}\n"
+  echo "  Detected hardware:"
+  echo "    OS      : $OS / $ARCH"
+  [[ -n "$APPLE_CHIP" ]] && echo "    Chip    : $APPLE_CHIP"
+  echo "    RAM     : ${RAM_GB} GB"
+  echo "    Profile : $PROFILE"
+  $HAS_NVIDIA && echo "    nvcc    : ${NVCC_VERSION:-unknown}"
 
-echo "  Profile  : $PROFILE"
-echo "  RAM      : ${RAM_GB} GB"
-if [[ -n "$APPLE_CHIP" ]]; then
-  echo "  Chip     : $APPLE_CHIP"
-fi
-if $HAS_NVIDIA; then
-  echo "  CUDA     : $CUDA_VERSION"
-fi
+  section "Configuration"
+  MODEL_PATH="$(prompt_val "Model storage path (MODEL_PATH)" "$MODEL_PATH")"
+  LLAMA_CPP_ROOT="$(prompt_val "llama.cpp root (LLAMA_CPP_ROOT)" "$LLAMA_CPP_ROOT")"
 
-# ── 7. Check / Install pixi ──────────────────────────────────────────────────
-section "Package Manager"
+  section "What to install"
+  echo "  1) Full install  — pixi env + packages + shared model storage  (recommended)"
+  echo "  2) Shared model storage only"
+  echo "  3) Thermal monitoring agent only"
+  echo "  4) vLLM only  (NVIDIA)"
+  echo "  5) Custom — choose components"
+  echo ""
+  local choice
+  choice="$(prompt_val "Choice" "1")"
 
-if command -v pixi &>/dev/null; then
-  ok "pixi found: $(pixi --version)"
-else
-  info "Installing pixi..."
-  curl -fsSL https://pixi.sh/install.sh | bash
-  # shellcheck source=/dev/null
-  export PATH="$HOME/.pixi/bin:$PATH"
-  ok "pixi installed"
-fi
+  case "$choice" in
+    1) DO_FULL=true; DO_SHARED=true ;;
+    2) DO_SHARED=true ;;
+    3) DO_THERMAL=true ;;
+    4) DO_VLLM=true ;;
+    5)
+      if prompt_yn "Full install (pixi env + packages)" "y"; then DO_FULL=true; fi
+      if prompt_yn "Shared model storage setup"          "y"; then DO_SHARED=true; fi
+      if prompt_yn "Thermal monitoring agent"            "n"; then DO_THERMAL=true; fi
+      if prompt_yn "vLLM (NVIDIA only)"                 "n"; then DO_VLLM=true; fi
+      ;;
+    *) error "Invalid choice: $choice"; exit 1 ;;
+  esac
 
-# ── 8. Homebrew tools (macOS only) ───────────────────────────────────────────
-if [[ "$OS" == "macos" ]]; then
-  section "macOS Tools"
-
-  if ! command -v brew &>/dev/null; then
-    warn "Homebrew not found — skipping brew packages (install from https://brew.sh)"
-  else
-    ok "Homebrew: $(brew --version | head -1)"
-
-    # mactop — thermal monitoring (no sudo, works on M-series)
-    if ! command -v mactop &>/dev/null; then
-      info "Installing mactop..."
-      brew install mactop && ok "mactop installed" || warn "mactop install failed (non-fatal)"
-    else
-      ok "mactop: already installed"
-    fi
-
-    # llama.cpp — GGUF conversion / inference server
-    if [[ ! -d "/Users/Shared/llama" ]]; then
-      if brew list llama.cpp &>/dev/null 2>&1; then
-        ok "llama.cpp: already installed via brew"
-      else
-        info "Installing llama.cpp via brew..."
-        brew install llama.cpp && ok "llama.cpp installed" || warn "llama.cpp install failed (non-fatal)"
-      fi
-    else
-      ok "llama.cpp: found at /Users/Shared/llama"
-    fi
+  if [[ "$DO_THERMAL" == true ]]; then
+    section "Thermal Agent"
+    THRESHOLD="$(prompt_val "Pause threshold °C" "$THRESHOLD")"
+    INTERVAL="$(prompt_val "Poll interval seconds" "$INTERVAL")"
   fi
-fi
 
-# ── 9. Core pixi environment ──────────────────────────────────────────────────
-section "Core Environment (pixi)"
-cd "$REPO_ROOT"
-info "Running: pixi install"
-pixi install
-ok "pixi environment ready"
+  section "Summary"
+  echo "  MODEL_PATH      : $MODEL_PATH"
+  echo "  LLAMA_CPP_ROOT  : $LLAMA_CPP_ROOT"
+  echo "  Full install    : $DO_FULL"
+  echo "  Shared storage  : $DO_SHARED"
+  echo "  Thermal agent   : $DO_THERMAL  (${THRESHOLD}°C / ${INTERVAL}s)"
+  echo "  vLLM            : $DO_VLLM"
+  echo ""
+  if ! prompt_yn "Proceed?" "y"; then echo "Aborted."; exit 0; fi
+}
 
-# ── 10. Python packages via pip inside pixi ───────────────────────────────────
-section "Python Packages"
+# ── main ──────────────────────────────────────────────────────────────────────
+detect_hardware
 
-# Helper to run pip inside the pixi environment
-pix_pip() { pixi run pip install --quiet "$@"; }
+if [[ "$WIZARD" == true ]]; then run_wizard; fi
 
-# ── Common packages ────────────────────────────────────────────────────────────
-info "Installing common packages..."
-pix_pip \
-  "transformers>=4.38" \
-  "datasets>=2.14" \
-  "accelerate>=0.24" \
-  peft \
-  evaluate \
-  "trl>=0.10" \
-  "gradio>=4.0" \
-  matplotlib seaborn tqdm rich psutil
+# Export for sourced helpers
+export MODEL_PATH LLAMA_CPP_ROOT THRESHOLD INTERVAL REPO_ROOT SCRIPT_DIR
+export OS ARCH PROFILE RAM_GB IS_APPLE_SILICON APPLE_CHIP HAS_NVIDIA NVCC_VERSION
 
-# ── Profile-specific packages ─────────────────────────────────────────────────
-case "$PROFILE" in
+# shellcheck source=install/components.sh
+source "$SCRIPT_DIR/install/components.sh"
+# shellcheck source=install/full.sh
+source "$SCRIPT_DIR/install/full.sh"
 
-  apple_silicon)
-    section "Apple Silicon Packages"
-
-    # PyTorch — ships with MPS support on macOS arm64
-    info "Installing PyTorch (MPS backend)..."
-    pix_pip torch torchvision torchaudio
-    ok "PyTorch installed (MPS enabled)"
-
-    # MLX — Apple Silicon native framework
-    info "Installing MLX..."
-    pix_pip mlx "mlx-lm>=0.20"
-    ok "MLX installed"
-
-    # CoreML export
-    info "Installing coremltools..."
-    pix_pip "coremltools>=8.0"
-    ok "coremltools installed"
-
-    # Recommend larger / smaller models based on RAM
-    echo ""
-    if (( RAM_GB >= 32 )); then
-      ok "RAM: ${RAM_GB} GB — suitable for 7B+ teachers with MLX"
-    elif (( RAM_GB >= 16 )); then
-      warn "RAM: ${RAM_GB} GB — stick to ≤3B teachers; use Q4 quants"
-    else
-      warn "RAM: ${RAM_GB} GB — use 1B student + 1.5B teacher only"
-    fi
-    ;;
-
-  nvidia)
-    section "NVIDIA / CUDA Packages"
-
-    # Pick torch index URL based on detected CUDA driver version
-    # nvidia-smi driver version e.g. "525.105.17"; map to CUDA toolkit version
-    CUDA_MAJOR=""
-    if [[ -n "$NVCC_VERSION" ]]; then
-      CUDA_MAJOR="$(echo "$NVCC_VERSION" | cut -d. -f1)"
-    fi
-
-    if [[ "$CUDA_MAJOR" == "12" ]]; then
-      TORCH_INDEX="https://download.pytorch.org/whl/cu121"
-      info "CUDA 12.x detected — installing PyTorch cu121"
-    elif [[ "$CUDA_MAJOR" == "11" ]]; then
-      TORCH_INDEX="https://download.pytorch.org/whl/cu118"
-      info "CUDA 11.x detected — installing PyTorch cu118"
-    else
-      TORCH_INDEX="https://download.pytorch.org/whl/cu121"
-      warn "CUDA version undetermined — defaulting to cu121"
-    fi
-
-    pix_pip torch torchvision torchaudio --index-url "$TORCH_INDEX"
-    ok "PyTorch (CUDA) installed"
-
-    # bitsandbytes — 4-bit / 8-bit quantisation
-    info "Installing bitsandbytes..."
-    pix_pip bitsandbytes
-    ok "bitsandbytes installed"
-
-    if (( RAM_GB >= 40 )); then
-      ok "VRAM/RAM profile: suitable for large teacher models"
-    fi
-    ;;
-
-  cpu)
-    section "CPU-only Packages"
-    warn "No accelerator detected — installing CPU-only PyTorch (slow for training)"
-    pix_pip torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-    ok "PyTorch (CPU) installed"
-    ;;
-esac
-
-# ── 11. Verify installation ───────────────────────────────────────────────────
-section "Verification"
-
-pixi run python - <<'PYEOF'
-import sys
-print(f"Python: {sys.version.split()[0]}")
-
-import torch
-print(f"PyTorch: {torch.__version__}")
-
-if torch.backends.mps.is_available():
-    print("MPS:     available")
-elif torch.cuda.is_available():
-    print(f"CUDA:    available ({torch.cuda.get_device_name(0)})")
-else:
-    print("Accel:   CPU only")
-
-try:
-    import mlx.core as mx
-    print(f"MLX:     {mx.__version__}")
-except ImportError:
-    pass
-
-try:
-    import transformers
-    print(f"transformers: {transformers.__version__}")
-except ImportError:
-    print("transformers: NOT installed")
-
-try:
-    import gradio
-    print(f"gradio:  {gradio.__version__}")
-except ImportError:
-    print("gradio:  NOT installed")
-PYEOF
-
-ok "Verification complete"
-
-# ── 12. Done ──────────────────────────────────────────────────────────────────
-section "Setup Complete"
-echo ""
-echo "  Profile  : $PROFILE"
-if [[ -n "$APPLE_CHIP" ]]; then
-  echo "  Chip     : $APPLE_CHIP"
-fi
-echo "  RAM      : ${RAM_GB} GB"
-echo ""
-echo "  Quick-start:"
-echo "    pixi run python -m distill.run_distillation_agent --open --backend mlx"
-echo "    pixi run python -m distill.eval_gradio"
-echo ""
-ok "Done!"
+if [[ "$DO_SHARED"  == true ]]; then install_shared_models; fi
+if [[ "$DO_THERMAL" == true ]]; then install_thermal_agent; fi
+if [[ "$DO_VLLM"    == true ]]; then install_vllm; fi
+if [[ "$DO_FULL"    == true ]]; then run_full_install; fi

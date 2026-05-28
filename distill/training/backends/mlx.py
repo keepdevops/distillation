@@ -35,6 +35,7 @@ from .mlx_memory import memory_safe_precomp_bs as _memory_safe_precomp_bs
 from .mlx_precompute import precompute_teacher_logits
 from .mlx_loss import kd_loss
 from .mlx_train_loop import run_training_loop
+from ...infra.config import cfg
 
 LOG = logging.getLogger(__name__)
 logging.basicConfig(
@@ -43,31 +44,28 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-OPEN_TEACHER = "Qwen/Qwen2-1.5B-Instruct"
-OPEN_STUDENT = "Qwen/Qwen2-0.5B-Instruct"
-
 
 def parse_args():
     p = argparse.ArgumentParser(description="MLX knowledge distillation")
-    p.add_argument("--teacher", type=str, default="meta-llama/Llama-3.2-8B-Instruct")
-    p.add_argument("--student", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
+    p.add_argument("--teacher", type=str, default=cfg.models.default_teacher)
+    p.add_argument("--student", type=str, default=cfg.models.default_student)
     p.add_argument("--open", action="store_true", help="Use open Qwen2 models (no HF login)")
-    p.add_argument("--dataset", type=str, default="tatsu-lab/alpaca", help=DATASET_HELP)
+    p.add_argument("--dataset", type=str, default=cfg.models.default_dataset, help=DATASET_HELP)
     p.add_argument("--output_dir", type=str, default="./distilled-mlx")
     p.add_argument("--epochs", type=int, default=2)
-    p.add_argument("--batch_size", type=int, default=2, help="Training batch size (default: 2)")
-    p.add_argument("--lora_r", type=int, default=8)
-    p.add_argument("--kd_temp", type=float, default=1.0, help="KD temperature")
+    p.add_argument("--batch_size", type=int, default=cfg.training.batch_size_mlx, help="Training batch size (default: 2)")
+    p.add_argument("--lora_r", type=int, default=cfg.training.lora_r)
+    p.add_argument("--kd_temp", type=float, default=cfg.training.kd_temperature, help="KD temperature")
     p.add_argument("--max_samples", type=int, default=2000)
     p.add_argument("--eval_steps", type=int, default=50)
     p.add_argument("--log_steps", type=int, default=10)
-    p.add_argument("--learning_rate", type=float, default=2e-4)
+    p.add_argument("--learning_rate", type=float, default=cfg.training.learning_rate)
     p.add_argument("--q_bits", type=int, default=4, choices=[4, 8], help="Quantization bits (4 or 8)")
     add_cache_and_offline(p)
     p.add_argument("--watchdog", action="store_true", help="Enable pause.flag monitoring")
     p.add_argument("--no_export", action="store_true", help="Skip MLX quantization export")
     p.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
-    p.add_argument("--topk_logits", type=int, default=50,
+    p.add_argument("--topk_logits", type=int, default=cfg.training.topk_logits,
                    help="Top-K teacher logits kept per token (default: 50, >99%% probability mass)")
     p.add_argument("--grad_acc", type=int, default=4,
                    help="Gradient accumulation steps (effective batch = batch_size x grad_acc, default: 4)")
@@ -177,7 +175,7 @@ def main():  # noqa: C901
         LOG.error("Could not query Metal device info: %s", e)
 
     if args.open:
-        args.teacher, args.student = OPEN_TEACHER, OPEN_STUDENT
+        args.teacher, args.student = cfg.models.open_teacher, cfg.models.open_student
         LOG.info("Using open models: teacher=%s  student=%s", args.teacher, args.student)
     if args.offline:
         os.environ["HF_HUB_OFFLINE"] = "1"

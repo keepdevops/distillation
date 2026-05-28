@@ -119,7 +119,7 @@ def main():
 
     callbacks = []
     if args.watchdog:
-        from .watchdog_callbacks import PauseFlagCallback
+        from distill.infra.watchdog_callbacks import PauseFlagCallback
         callbacks.append(PauseFlagCallback(args.output_dir))
 
     trainer = DistillationTrainer(

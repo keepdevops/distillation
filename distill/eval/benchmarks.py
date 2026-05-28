@@ -30,11 +30,11 @@ from .perplexity import eval_loss, detect_step, last_step_in_jsonl
 from ..infra.train_utils import get_device, load_student_model
 from ..backends.mlx_utils import is_mlx_available, load_mlx_model, compute_mlx_perplexity
 from ..backends.cpp_utils import is_cpp_available, find_gguf, compute_gguf_perplexity
+from ..infra.config import cfg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-OPEN_STUDENT = "Qwen/Qwen2-0.5B-Instruct"
 WIKITEXT_DATASET = "wikitext"
 WIKITEXT_CONFIG = "wikitext-2-raw-v1"
 
@@ -44,13 +44,13 @@ def parse_args():
     p.add_argument("output_dir", type=str, help="Model output dir (results written here)")
     p.add_argument("--checkpoint", type=str, default=None,
                    help="Checkpoint dir to eval (default: output_dir itself)")
-    p.add_argument("--student", type=str, default=OPEN_STUDENT,
+    p.add_argument("--student", type=str, default=cfg.models.open_student,
                    help="Base model id (fallback for tokenizer)")
-    p.add_argument("--n_sequences", type=int, default=500,
+    p.add_argument("--n_sequences", type=int, default=cfg.eval.n_sequences,
                    help="Number of sequences to evaluate (default: 500)")
-    p.add_argument("--max_length", type=int, default=512,
+    p.add_argument("--max_length", type=int, default=cfg.eval.max_length,
                    help="Max token length per sequence (default: 512)")
-    p.add_argument("--batch_size", type=int, default=8, help="Batch size for evaluation (default: 8)")
+    p.add_argument("--batch_size", type=int, default=cfg.eval.batch_size, help="Batch size for evaluation (default: 8)")
     p.add_argument("--baseline_dir", type=str, default=None,
                    help="Previous run dir to compare against (regression detection)")
     p.add_argument("--threshold", type=float, default=15.0,

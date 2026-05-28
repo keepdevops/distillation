@@ -14,6 +14,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..backends.mlx_utils import load_mlx_model, mlx_generate_responses, compute_mlx_perplexity
 from ..backends.cpp_utils import find_gguf, generate_gguf_responses, compute_gguf_perplexity
+from ..infra.config import cfg
 from .quality_metrics import JUDGE_PROMPT, parse_judge_score
 from .quality_inference import batch_judge_responses, compute_teacher_perplexity_on_responses
 
@@ -139,7 +140,7 @@ def _run_judge(
                 gguf_teacher_path, judge_prompts,
                 max_tokens=60, temperature=0.0,
                 n_parallel=args.batch_size,
-                port=8090,
+                port=cfg.services.llama_teacher_port,
             )
         elif use_mlx:
             logger.info("MLX judge: generating %d judgments sequentially...", len(samples))
