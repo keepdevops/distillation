@@ -3,7 +3,7 @@
 A bare-metal knowledge distillation toolkit for compressing large language models
 on Apple Silicon (M1/M2/M3) and NVIDIA GPUs. Supports multiple training backends,
 agentic hyperparameter search, domain-specialist CoT distillation, thermal protection,
-and multi-format export to GGUF, CoreML, and MLX quantized.
+and multi-format export to GGUF, CoreML, MLX, AWQ, GPTQ, ONNX, and EXL2.
 
 ---
 
@@ -18,6 +18,8 @@ and multi-format export to GGUF, CoreML, and MLX quantized.
    - [MLX — Forward KL (Recommended for Apple Silicon)](#mlx--forward-kl)
    - [MiniLLM — Reverse KL / GRPO](#minillm--reverse-kl--grpo)
    - [SFT Warmup (Stage 1)](#sft-warmup-stage-1)
+   - [DPO — Direct Preference Optimization](#dpo--direct-preference-optimization)
+   - [ORPO / SimPO — Reference-Free Alignment](#orpo--simpo--reference-free-alignment)
    - [Forward KD for Classification](#forward-kd-for-classification)
 7. [Orchestrator — Autonomous Pipeline](#orchestrator--autonomous-pipeline)
 8. [Data Pipeline](#data-pipeline)
@@ -28,26 +30,35 @@ and multi-format export to GGUF, CoreML, and MLX quantized.
 9. [Expert Pipeline — Domain Distillation with CoT](#expert-pipeline--domain-distillation-with-cot)
 10. [Evaluation](#evaluation)
     - [Generation Quality Metrics](#generation-quality-metrics)
+    - [MT-Bench](#mt-bench)
     - [Validation Loss](#validation-loss)
     - [WikiText-2 Benchmarks](#wikitext-2-benchmarks)
 11. [Monitoring & Protection](#monitoring--protection)
     - [Thermal Agent](#thermal-agent)
     - [Training Watchdog](#training-watchdog)
+    - [OOM Recovery](#oom-recovery)
 12. [Export](#export)
     - [GGUF (llama.cpp)](#gguf-llamacpp)
     - [CoreML (Apple Neural Engine)](#coreml-apple-neural-engine)
     - [MLX Quantized](#mlx-quantized)
-13. [Gradio UIs](#gradio-uis)
+    - [AWQ / GPTQ (CUDA only)](#awq--gptq-cuda-only)
+    - [ONNX](#onnx)
+    - [EXL2](#exl2)
+    - [Export Matrix](#export-matrix)
+13. [C++ Bindings](#c-bindings)
+14. [Distributed Training (Ray)](#distributed-training-ray)
+15. [Notifications (Webhooks)](#notifications-webhooks)
+16. [Gradio UIs](#gradio-uis)
     - [Distillation Launcher](#distillation-launcher)
     - [Universal Model Evaluator](#universal-model-evaluator)
-14. [Algorithm Reference](#algorithm-reference)
-15. [Configuration Reference](#configuration-reference)
-16. [Air-Gap Mode](#air-gap-mode)
-17. [Multi-User Shared Storage](#multi-user-shared-storage)
-18. [Session Management](#session-management)
-19. [Output Artifacts](#output-artifacts)
-20. [Troubleshooting](#troubleshooting)
-21. [Project Structure](#project-structure)
+17. [Algorithm Reference](#algorithm-reference)
+18. [Configuration Reference](#configuration-reference)
+19. [Air-Gap Mode](#air-gap-mode)
+20. [Multi-User Shared Storage](#multi-user-shared-storage)
+21. [Session Management](#session-management)
+22. [Output Artifacts](#output-artifacts)
+23. [Troubleshooting](#troubleshooting)
+24. [Project Structure](#project-structure)
 
 ---
 
@@ -61,14 +72,18 @@ rather than fitting hard labels, capturing nuance that simple fine-tuning cannot
 
 | Feature | Details |
 |---------|---------|
-| Training methods | Forward KL (MLX), Reverse KL / GRPO (MiniLLM), SFT, Classification KD |
+| Training methods | Forward KL (MLX), Reverse KL / GRPO (MiniLLM), SFT, DPO, ORPO/SimPO, Classification KD |
 | Backends | MLX (Apple-native), PyTorch/MPS, Unsloth, vLLM |
 | Acceleration | 2–5× faster via MLX lazy evaluation; 8–15× faster PPL eval via llama.cpp |
 | Data synthesis | Magpie self-synthesis, Self-Instruct, domain CoT generation via GGUF teacher |
 | Domain support | Tax, Legal, Medical, Finance, Coding, General |
-| Export formats | GGUF (llama.cpp), CoreML (.mlpackage), MLX Q4/Q8 quantized |
-| Protection | Thermal agent (hardware temps/power), Training watchdog (plateau/divergence) |
-| UI | Two Gradio interfaces — full launcher + standalone evaluator |
+| Export formats | GGUF (llama.cpp), CoreML (.mlpackage), MLX Q4/Q8, AWQ, GPTQ, ONNX, EXL2, SafeTensors |
+| Protection | Thermal agent (hardware temps/power), Training watchdog (plateau/divergence), OOM auto-recovery |
+| C++ bindings | Native pybind11 bindings for llama.cpp, LoRA, thermal, export, and metric streaming |
+| Distributed | Ray-based parallel job orchestration for ablation sweeps and A/B experiments |
+| Notifications | Webhook (Slack/Discord) on run completion, failure, checkpoint save, thermal alert |
+| Evaluation | Quality metrics, MT-Bench, WikiText-2, standard benchmarks, LLM-as-judge |
+| UI | Enhanced Gradio launcher + standalone evaluator with live hardware gauges, A/B comparisons, export matrix |
 | Air-gap | Full offline mode — pre-cache models & datasets, train without network |
 
 ---
@@ -98,17 +113,24 @@ Long-form design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Documentation in
     │         (PyTorch/MPS, Unsloth)                  │
     └──────────┬──────────────────────────────────────┘
                │
-    ┌──────────▼──────────┐    ┌─────────────────────┐
-    │   Evaluation        │    │   Export             │
-    │   run_eval.py       │    │   GGUF               │
-    │   eval_quality.py   │    │   CoreML             │
-    │   run_benchmarks.py │    │   MLX Q4/Q8          │
-    └─────────────────────┘    └─────────────────────┘
+    ┌──────────▼──────────┐   ┌──────────────────────────┐
+    │   Stage 3 (opt.)    │   │  Alignment (opt.)        │
+    │   DPO / ORPO        │   │  from preference pairs   │
+    └──────────┬──────────┘   └──────────────────────────┘
+               │
+    ┌──────────▼──────────┐    ┌─────────────────────────┐
+    │   Evaluation        │    │   Export                 │
+    │   run_eval.py       │    │   GGUF / CoreML / MLX    │
+    │   eval_quality.py   │    │   AWQ / GPTQ / ONNX      │
+    │   mt_bench.py       │    │   EXL2 / SafeTensors     │
+    │   run_benchmarks.py │    │   (export_matrix.py)     │
+    └─────────────────────┘    └─────────────────────────┘
                │
     ┌──────────▼─────────────────────────────────────┐
     │   Monitoring (always-on, parallel)             │
     │   thermal_agent.py     Hardware (temp/power)   │
     │   training_watchdog.py ML (plateau/divergence) │
+    │   oom_recovery.py      Auto-retry on OOM       │
     │   ─── communicate via pause.flag ──────────    │
     └────────────────────────────────────────────────┘
 ```
@@ -200,6 +222,12 @@ The script also:
 - Runs `pixi install` to create the base conda environment
 - Prints RAM-aware model size guidance
 - Runs a Python verification snippet confirming MPS / CUDA / MLX availability
+
+To build the optional C++ bindings:
+
+```bash
+bash scripts/build_cpp.sh   # requires cmake + clang
+```
 
 **Manual install:**
 
@@ -360,6 +388,51 @@ After SFT finishes, point MiniLLM's `--student` at `distilled-minillm/sft_checkp
 
 ---
 
+### DPO — Direct Preference Optimization
+
+**Module:** `distill.training.backends.dpo`
+**Purpose:** Align a distilled student on preference pairs (chosen / rejected)
+
+Runs after SFT or KD. Loads a JSONL preference dataset and calls TRL's `DPOTrainer`
+with LoRA. Suitable for tuning instruction-following quality with human-ranked pairs.
+
+```bash
+pixi run python -m distill.training.backends.dpo \
+  --model_path ./distilled-sft \
+  --dataset_path ./my_preferences.jsonl \
+  --output_dir ./distilled-dpo \
+  --lora_r 32 --beta 0.1 --epochs 1
+```
+
+**Preference dataset format** (JSONL):
+```jsonl
+{"prompt": "...", "chosen": "...", "rejected": "..."}
+```
+
+---
+
+### ORPO / SimPO — Reference-Free Alignment
+
+**Module:** `distill.training.backends.orpo`
+**Purpose:** Lower-memory alignment without a reference model
+
+ORPO trains without a frozen reference copy — saves ~50% peak memory vs DPO.
+SimPO uses a length-normalised reward; no reference model required.
+
+```bash
+pixi run python -m distill.training.backends.orpo \
+  --model_path ./distilled-sft \
+  --dataset_path ./my_preferences.jsonl \
+  --output_dir ./distilled-orpo \
+  --method orpo --lora_r 32 --epochs 1
+
+# SimPO variant
+pixi run python -m distill.training.backends.orpo \
+  --method simpo --gamma 0.5
+```
+
+---
+
 ### Forward KD for Classification
 
 **Module:** `distill.distill_forward` (`python -m distill.distill_forward`)
@@ -427,6 +500,7 @@ writes hyperparameter suggestions for the next run.
 | Domain expert | `expert_pipeline.py --mode distill` |
 | Hyperparameter search | `--n_trials 3 --curriculum` |
 | Full production run | `bash scripts/run.sh golden` |
+| Parallel ablations | `ray_distributed.py` (see [Distributed Training](#distributed-training-ray)) |
 
 ---
 
@@ -630,13 +704,22 @@ pixi run python -m distill.eval_quality ./distilled-mlx \
 
 Results saved to `quality_metrics.json`.
 
-**Recommended eval sequence:**
+### MT-Bench
+
+**Module:** `distill.eval.mt_bench`
+**Purpose:** Multi-turn conversational quality (80-question benchmark)
+
+Two modes: `llm` (GPT-4 or local judge model) and `heuristic` (fast length + coherence proxy).
+A fast 10-question subset is available for CI / smoke checks.
+
+```bash
+pixi run python -m distill.eval.mt_bench \
+  --model_dir ./distilled-mlx \
+  --judge_mode heuristic \
+  --fast          # 10-question subset
 ```
-1. run_eval.py         → quick perplexity sanity check (~2 min)
-2. eval_quality.py     → generation diversity check (~5 min)
-3. run_benchmarks.py   → WikiText-2 standardised comparison (~5 min)
-4. eval_quality.py --judge  → final LLM-as-judge quality gate (~15 min)
-```
+
+**MT-Bench categories:** writing, roleplay, reasoning, math, coding, extraction, STEM, humanities.
 
 ### Validation Loss
 
@@ -679,6 +762,15 @@ pixi run python -m distill.run_benchmarks ./distilled-mlx \
 | Well-distilled student (1.5B teacher) | ~14–18 |
 | Qwen2-1.5B-Instruct (teacher) | ~10–13 |
 
+**Recommended eval sequence:**
+```
+1. run_eval.py           → quick perplexity sanity check (~2 min)
+2. eval_quality.py       → generation diversity check (~5 min)
+3. run_benchmarks.py     → WikiText-2 standardised comparison (~5 min)
+4. mt_bench.py --fast    → multi-turn quality proxy (~10 min)
+5. eval_quality.py --judge  → final LLM-as-judge quality gate (~15 min)
+```
+
 ---
 
 ## Monitoring & Protection
@@ -701,8 +793,8 @@ pixi run python -m distill.thermal_agent \
   --watch ./distilled-mlx ./distilled-minillm \
   --threshold 85 --metric soc_temp_c --interval 30
 
-# Persistent — install as macOS LaunchAgent (survives reboot)
-bash scripts/install_thermal_agent.sh
+# Persistent — managed via services.sh
+bash scripts/services.sh start --monitor
 ```
 
 **Flags:**
@@ -718,7 +810,6 @@ bash scripts/install_thermal_agent.sh
 | `--daemon` | — | Run as background process |
 
 Uses `mactop` (`/opt/homebrew/bin/mactop`) — M3 Max compatible, no `sudo` required.
-Provides: `cpu_temp`, `gpu_temp`, `soc_temp`, `cpu_power`, `gpu_power`, `total_power`.
 
 ### Training Watchdog
 
@@ -746,6 +837,25 @@ pixi run python -m distill.training_watchdog ./distilled-mlx \
 
 Writes `watchdog_suggestions.json` with learning rate scaling recommendations.
 
+### OOM Recovery
+
+**Module:** `distill.training.oom_recovery`
+
+Wraps any training function with automatic retry on out-of-memory errors (CUDA OOM,
+MPS OOM, Metal allocation failure). On each OOM, `batch_size` is halved and
+`grad_accum` doubled (preserving effective batch size), then the run retries — up to
+`max_retries` times (default 3).
+
+```python
+from distill.training.oom_recovery import with_oom_recovery
+
+@with_oom_recovery(max_retries=3)
+def my_train_fn(batch_size, grad_accum, **kwargs):
+    ...
+```
+
+Enabled automatically when `--watchdog` is passed to the orchestrator.
+
 ---
 
 ## Export
@@ -753,7 +863,7 @@ Writes `watchdog_suggestions.json` with learning rate scaling recommendations.
 ### GGUF (llama.cpp)
 
 ```bash
-bash scripts/export_student_gguf.sh ./distilled-minillm
+bash scripts/run.sh export ./distilled-minillm
 # → /Users/Shared/llama/models/distilled-minillm-Q4_K_M.gguf
 ```
 
@@ -791,6 +901,64 @@ pixi run mlx_lm.convert \
   -q --q-bits 4
 ```
 
+### AWQ / GPTQ (CUDA only)
+
+**Module:** `distill.export.awq_gptq_export`
+
+AWQ (Activation-aware Weight Quantization) produces better 4-bit quality than GPTQ.
+Both require CUDA for calibration. On Apple Silicon, use GGUF or MLX instead.
+
+```bash
+# AWQ
+pixi run python -m distill.export.awq_gptq_export \
+  --model_dir ./distilled-minillm \
+  --method awq --bits 4 \
+  --output_dir ./distilled-awq
+
+# GPTQ
+pixi run python -m distill.export.awq_gptq_export \
+  --method gptq --bits 4 --group_size 128
+```
+
+### ONNX
+
+**Module:** `distill.export.onnx_export`
+
+Exports to ONNX for deployment via ONNX Runtime (cross-platform, CPU/GPU).
+
+```bash
+pixi run python -m distill.export.onnx_export \
+  --model_dir ./distilled-minillm \
+  --output_dir ./distilled-onnx \
+  --opset 17 --optimize
+```
+
+### EXL2
+
+**Module:** `distill.export.exl2_export`
+
+EXL2 format for ExLlamaV2 — high-throughput inference on NVIDIA GPUs.
+
+```bash
+pixi run python -m distill.export.exl2_export \
+  --model_dir ./distilled-minillm \
+  --output_dir ./distilled-exl2 \
+  --bpw 4.0   # bits per weight
+```
+
+### Export Matrix
+
+**Module:** `distill.export.export_matrix`
+
+Generates all export formats in one pass and produces a comparison report.
+
+```bash
+pixi run python -m distill.export.export_matrix \
+  --model_dir ./distilled-minillm \
+  --formats gguf mlx coreml onnx \
+  --report_dir ./export_report
+```
+
 **Export format comparison:**
 
 | Format | Size (1B model) | Inference speed | Use case |
@@ -798,7 +966,99 @@ pixi run mlx_lm.convert \
 | GGUF Q4_K_M | ~700 MB | Fastest (llama.cpp, Metal) | Production inference, Ollama |
 | MLX Q4 | ~700 MB | Fast (Apple-native) | On-device Apple Silicon |
 | CoreML int4 | ~700 MB | Very fast (ANE) | iOS / macOS app embedding |
+| AWQ 4-bit | ~700 MB | Fast (vLLM, TGI) | NVIDIA high-throughput serving |
+| GPTQ 4-bit | ~700 MB | Fast (exllama, vLLM) | NVIDIA, wide ecosystem support |
+| ONNX | ~2 GB (fp32) | Medium (CPU/GPU) | Cross-platform deployment |
+| EXL2 | ~700 MB | Fastest NVIDIA | ExLlamaV2 high-throughput |
 | SafeTensors (fp16) | ~2 GB | Baseline | Fine-tuning, LoRA merge |
+
+---
+
+## C++ Bindings
+
+**Module:** `distill.cpp`
+**Build:** `bash scripts/build_cpp.sh`
+
+Optional pybind11 extensions that bypass Python overhead for hot paths:
+
+| Binding | Module | Purpose |
+|---------|--------|---------|
+| `llama_bindings` | `distill.cpp` | Direct llama.cpp model inference (no subprocess) |
+| `lora_bindings` | `distill.cpp` | Native LoRA weight merge and rank conversion |
+| `thermal_bindings` | `distill.cpp` | Low-latency `mactop` / `smc` polling |
+| `export_bindings` | `distill.cpp` | Fast GGUF conversion from Python |
+| `metric_streamer` | `distill.cpp` | Lock-free ring buffer for live metric streaming |
+
+```python
+from distill.cpp import llama_bindings
+model = llama_bindings.load("/Users/Shared/llama/models/model.gguf")
+tokens = model.tokenize("Hello world")
+output = model.generate(tokens, max_tokens=128)
+```
+
+C++ bindings are optional — all Python fallbacks remain active if the build is absent.
+Adapter classes in `distill/backends/` wrap both paths behind a common interface.
+
+---
+
+## Distributed Training (Ray)
+
+**Module:** `distill.orchestration.ray_distributed`
+
+Runs multiple distillation jobs in parallel using [Ray](https://ray.io) remote tasks.
+Useful for large ablation sweeps, A/B model comparisons, and multi-student distillation.
+Falls back to sequential execution if Ray is not installed.
+
+```bash
+pixi run pip install "ray>=2.9"
+
+pixi run python -m distill.orchestration.ray_distributed \
+  --jobs configs/ablation_sweep.json \
+  --max_parallel 2
+```
+
+**Job descriptor format** (`configs/ablation_sweep.json`):
+```json
+[
+  {"job_id": "lr_1e4", "backend": "mlx", "teacher": "Qwen/Qwen2-1.5B-Instruct",
+   "student": "Qwen/Qwen2-0.5B", "dataset": "yahma/alpaca-cleaned",
+   "output_dir": "./runs/lr_1e4", "lr": 1e-4, "epochs": 3},
+  {"job_id": "lr_2e4", "lr": 2e-4, "output_dir": "./runs/lr_2e4", "epochs": 3}
+]
+```
+
+Results and best-run summary are written to `ray_results.json`.
+
+---
+
+## Notifications (Webhooks)
+
+**Module:** `distill.notifications.webhook`
+
+POST notifications to Slack or Discord on key run events. URLs are read from
+environment variables — never hardcoded.
+
+```bash
+# Slack
+export DISTILL_SLACK_WEBHOOK=https://hooks.slack.com/services/...
+
+# Discord
+export DISTILL_DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
+```
+
+**Events triggered:**
+
+| Event | When |
+|-------|------|
+| `run_complete` | Training finished successfully |
+| `run_failed` | Exception terminated the run |
+| `checkpoint_saved` | New checkpoint written to disk |
+| `thermal_alert` | Thermal agent paused training |
+
+Enable in the agent with `--notify` or configure in `configs/defaults.json`:
+```json
+{ "notify": true }
+```
 
 ---
 
@@ -823,7 +1083,7 @@ pixi run python -m distill.launch_ui
 | **Configure & Launch** | All training parameters with backend-aware defaults |
 | **Data Prep** | Magpie synthesis, Self-Instruct generation, Dataset Filter |
 | **Domain Synthesis** | Domain-specific Magpie with domain selector + system prompt editor |
-| **Eval** | Perplexity, Quality Eval, WikiText-2 benchmark runner |
+| **Eval** | Perplexity, Quality Eval, WikiText-2, MT-Bench runner |
 | **Expert Pipeline** | 4-step CoT workflow: inspect → remap → CoT generation → distill |
 | **Live Logs** | Real-time log stream + training loss / gradient norm charts |
 | **Help** | Full operation guide, parameter reference, algorithm reference |
@@ -831,10 +1091,22 @@ pixi run python -m distill.launch_ui
 **UI features:**
 - Progress bar on every tab (parses `Step X/Y`, `Epoch X/Y`, tqdm `75%|`)
 - Live loss and gradient norm charts updated every 2 seconds
+- Live hardware gauges — CPU/GPU/SoC temp and power via `mactop`
 - Stop button (SIGKILL) — last checkpoint always preserved
 - Refresh buttons for model / dataset dropdowns (auto-scans HF cache + local dirs)
 - Backend toggle auto-updates `batch_size`, `grad_acc`, `lora_r` defaults
+- A/B experiment comparison panel (side-by-side generation + metric diff)
+- Export matrix UI — select target formats and generate all in one click
 - All runs log to `runs/` with paired `.log` and `.jsonl` files
+
+The enhanced `distill/ui/` component library provides the underlying widgets
+(animations, LoRA metrics charts, regression tracker, production pack). Launch it
+directly for a standalone dashboard:
+
+```bash
+pixi run python -m distill.ui.entry
+# → http://127.0.0.1:7862
+```
 
 ### Universal Model Evaluator
 
@@ -897,8 +1169,9 @@ pixi run python -m distill.show_algorithms --latex algorithms.tex    # export La
 | 2 | Stage 1 — SFT Warmup (response-only cross-entropy) | `distill_sft.py` |
 | 3 | Stage 2A/B — Forward KL + CE with top-K sparse logits + annealing | `distill_mlx.py` |
 | 4 | Stage 2C — Reverse KL / GRPO with group-normalised advantage | `distill_minillm.py` |
-| 5 | LoRA Parameterization (`h = W₀x + (α_r/r)·B(Ax)`) | all backends |
-| 6 | AdamW + Cosine LR with 3% linear warmup | all backends |
+| 5 | DPO / ORPO — Preference alignment | `training/backends/dpo.py`, `orpo.py` |
+| 6 | LoRA Parameterization (`h = W₀x + (α_r/r)·B(Ax)`) | all backends |
+| 7 | AdamW + Cosine LR with 3% linear warmup | all backends |
 
 ---
 
@@ -910,6 +1183,12 @@ All configs live in `configs/`.
 
 Full production run config — loaded by `scripts/run.sh golden`. Edit to change dataset,
 epochs, LoRA rank, export targets, etc.
+
+### `configs/defaults.json`
+
+Global defaults for all orchestrator runs. Keys: `backend`, `export`, `epochs`,
+`notify`, `watchdog`, `oom_recovery`, `max_samples`. Values in this file are
+lowest-priority — CLI flags and `--config` overrides always win.
 
 ### `configs/mlx_recommended.json`
 
@@ -945,6 +1224,20 @@ Default PyTorch agent config:
   "grad_acc": 8
 }
 ```
+
+### `configs/models.json`
+
+Named model shortcuts (`"open-1b"`, `"open-3b"`, etc.) mapping to HF repo IDs.
+Used by `--open` and the UI model dropdowns.
+
+### `configs/overrides.json.example`
+
+Template for machine-local overrides (copy to `configs/overrides.json`, git-ignored).
+Useful for setting default teacher/student paths or GGUF server flags per machine.
+
+### `configs/thermal.json`
+
+Thermal agent defaults: `threshold`, `metric`, `hysteresis`, `interval`.
 
 ### `configs/watchdog_rules.json`
 
@@ -1003,11 +1296,7 @@ Share models and GGUF files across macOS user profiles.
 
 ```bash
 # Primary setup
-bash scripts/setup_shared_models.sh
-# → Sets MODEL_PATH=/Users/Shared/models in ~/.zshrc
-
-# For additional users on the same Mac
-cd /path/to/distill && bash scripts/setup_shared_models.sh
+bash scripts/install/full.sh   # sets MODEL_PATH=/Users/Shared/models in ~/.zshrc
 ```
 
 **Shared locations:**
@@ -1024,21 +1313,21 @@ cd /path/to/distill && bash scripts/setup_shared_models.sh
 
 ```bash
 # Start background services in tmux (recommended for long runs)
-bash scripts/start.sh                # watchdog + dashboard
-bash scripts/start.sh --monitor      # + thermal agent
-bash scripts/start.sh --eval         # use eval_gradio instead of dashboard
+bash scripts/services.sh start              # watchdog + dashboard
+bash scripts/services.sh start --monitor    # + thermal agent
+bash scripts/services.sh start --eval       # use eval_gradio instead of dashboard
 
 # Attach to running session
 tmux attach -t distill
 
 # Stop everything cleanly
-bash scripts/stop.sh
+bash scripts/services.sh stop
 
-# Kill UI only
-bash scripts/kill_ui.sh
+# Quick Gradio launcher (foreground)
+bash scripts/gradio.sh
 ```
 
-`start.sh` launches `caffeinate` to prevent the machine sleeping during long runs and
+`services.sh` launches `caffeinate` to prevent the machine sleeping during long runs and
 opens three tmux windows: **watchdog**, **dashboard/eval**, and optionally **thermal**.
 
 ---
@@ -1061,6 +1350,8 @@ your-model/
 ├── trainer_state.json           # HF Trainer checkpoint state
 ├── quality_metrics.json         # eval_quality.py results
 ├── benchmark_results.json       # WikiText-2 perplexity
+├── mt_bench_results.json        # MT-Bench scores per category
+├── export_report/               # export_matrix.py comparison report
 ├── sft_labels.jsonl             # Cached teacher greedy completions (Stage 1)
 ├── watchdog_suggestions.json    # Watchdog LR scaling recommendations
 └── experiment_log.jsonl         # Multi-trial history + propose_next() suggestions
@@ -1092,7 +1383,8 @@ your-model/
 - Increase `--num_generations` to 4–8
 
 **`MPS backend out of memory`**
-- Reduce `--batch_size` (try 1 or 2) and `--max_new_tokens` (try 64)
+- OOM recovery will auto-halve batch size (up to 3 retries) — check logs for `[OOM recovery]`
+- Manually reduce `--batch_size` (try 1 or 2) and `--max_new_tokens` (try 64)
 
 **MLX → numpy float16 `PEP 3118` error**
 ```python
@@ -1118,6 +1410,39 @@ pixi run pip install trl transformers peft datasets gradio
 **Thermal pauses too frequent**
 - Raise `--threshold` to 90°C (observed M3 Max peaks under MPS load: GPU 57°C)
 - Increase `--interval` to 60 s to reduce overhead
+- Edit `configs/thermal.json` to make the change permanent
+
+**`FileNotFoundError: Directory domain_data/<domain> is neither a Dataset directory nor a DatasetDict directory`**
+- The domain's `magpie_raw.jsonl` is empty (never generated). Run synthesis first:
+```bash
+pixi run python -m distill.data.magpie --domain coding --n 500 \
+  --output_dir domain_data/coding --backend mps --batch_size 8 --resume
+```
+- Replace `coding` with `finance`, `medical`, or `tax` as needed.
+
+**`ValueError: Unknown split "train". Should be one of ['train_sft', 'test_sft', …]`**
+- Auto-split selection is active; if you see this on an older install, pull latest code.
+
+**Domain registry not found / domain falls back to 'general'**
+- Verify: `ls configs/domain_prompts.json`
+
+**AWQ / GPTQ export fails on Apple Silicon**
+- These require CUDA calibration; use GGUF or MLX Q4 on Apple Silicon instead.
+
+**C++ bindings not found (`ImportError: No module named 'distill.cpp'`)**
+- Run `bash scripts/build_cpp.sh` — requires cmake and clang. All fallbacks remain active without bindings.
+
+**Webhook notifications not sending**
+- Check env vars: `echo $DISTILL_SLACK_WEBHOOK`
+- Test: `pixi run python -c "from distill.notifications.webhook import test_webhook; test_webhook()"`
+
+**Training watchdog not running after `services.sh start`**
+- Check the tmux `watchdog` window: `tmux attach -t distill`
+- Restart manually:
+```bash
+caffeinate -dims pixi run python -m distill.training_watchdog \
+  distilled-minillm --config configs/watchdog_rules.json 2>&1 | tee -a watchdog.log
+```
 
 ---
 
@@ -1128,20 +1453,49 @@ Python sources live in the installable **`distill/`** package (`pip install -e .
 ```
 ├── distill/                       Python package (training, eval, UIs)
 │   ├── launch_ui/                 Gradio launcher (split subpackage)
-│   ├── data_pipeline.py           Dataset loading & formatting
-│   ├── run_distillation_agent.py  Autonomous orchestrator
-│   └── …                          See repo tree
-├── scripts/                       Shell helpers (.sh), LaunchAgent plist, etc.
-│   ├── install.sh                 Hardware-aware installer (Apple Silicon / NVIDIA / CPU)
-│   ├── run.sh                     Distillation runs: golden, production, phase2, smoke, download, export
-│   └── services.sh                Service management: start, stop, monitor
+│   ├── ui/                        Enhanced UI component library
+│   │   ├── components/            Hardware gauges, A/B compare, export matrix UI, …
+│   │   ├── tabs/                  Alignment, training live, hardware charts, …
+│   │   └── core/                  Event bus, tab registry, state manager
+│   ├── training/
+│   │   ├── backends/              mlx, minillm, sft, dpo, orpo, forward, unsloth
+│   │   └── oom_recovery.py        Auto-halve batch size on OOM
+│   ├── export/                    AWQ/GPTQ, ONNX, EXL2, export matrix, report
+│   ├── eval/                      quality, mt_bench, benchmarks, standard_benchmarks
+│   ├── orchestration/
+│   │   ├── ray_distributed.py     Parallel job orchestration
+│   │   └── checkpoint_resume.py   Resume from any epoch checkpoint
+│   ├── monitoring/                thermal_structured, fan_control, temp_logger
+│   ├── notifications/             Slack/Discord webhooks
+│   ├── backends/                  C++ adapter wrappers (cpp_metrics_adapter, lora_bridge, …)
+│   ├── cpp/                       pybind11 C++ extensions (build with scripts/build_cpp.sh)
+│   ├── config/                    Pydantic schemas (schemas.py)
+│   ├── infra/                     Unified config loader (infra/config.py)
+│   └── data_pipeline.py           Dataset loading & formatting
+├── scripts/
+│   ├── install.sh                 Hardware-aware installer
+│   ├── install/                   Modular install components (components.sh, full.sh)
+│   ├── run.sh                     Distillation runs: golden, production, phase2, export, …
+│   ├── services.sh                Service management: start, stop, monitor
+│   ├── gradio.sh                  Quick Gradio launcher
+│   ├── build_cpp.sh               Build C++ pybind11 extensions
+│   ├── chaos_monkey.py            UX stress-tester
+│   └── uninstall.sh               Clean uninstall
 ├── docs/                          Guides (see docs/INDEX.md)
 ├── configs/
 │   ├── golden_pipeline.json       Production run config
-│   ├── mlx_recommended.json       MLX recommended settings
-│   ├── agent_config.json          Default agent config
+│   ├── mlx_recommended.json       MLX recommended settings (M3 Max)
+│   ├── agent_config.json          Default PyTorch agent config
+│   ├── defaults.json              Global defaults (lowest priority)
+│   ├── models.json                Named model shortcuts
+│   ├── overrides.json.example     Machine-local overrides template
+│   ├── thermal.json               Thermal agent defaults
 │   ├── watchdog_rules.json        Plateau / divergence rules
 │   └── domain_prompts.json        Magpie domain registry
+├── tests/
+│   ├── test_cpp_bindings.py       C++ binding tests
+│   ├── test_data_pipeline.py      Data pipeline unit tests
+│   └── test_ui_components.py      UI component tests
 ├── pyproject.toml                 setuptools / console entry points
 ├── pixi.toml                      Conda + editable local package
 └── requirements.txt               Pip dependency list
